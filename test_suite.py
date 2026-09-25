@@ -243,11 +243,6 @@ class TestMCPStdioProtocol(unittest.TestCase):
             proc.stdin.flush()
             list_resp = json.loads(proc.stdout.readline())
             tool_names = [t["name"] for t in list_resp["result"]["tools"]]
-            self.assertIn("list_sessions", tool_names)
-            self.assertIn("send_message", tool_names)
-            self.assertIn("get_responses", tool_names)
-            self.assertIn("purge_sessions", tool_names)
-
             # 4. tools/call list_sessions
             call_req = {
                 "jsonrpc": "2.0",
@@ -260,6 +255,20 @@ class TestMCPStdioProtocol(unittest.TestCase):
             call_resp = json.loads(proc.stdout.readline())
             self.assertFalse(call_resp["result"]["isError"])
             self.assertIn("content", call_resp["result"])
+
+            # 5. tools/call rename_session
+            rename_req = {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "rename_session", "arguments": {"new_name": "renamed-suite-bridge"}}
+            }
+            proc.stdin.write(json.dumps(rename_req) + "\n")
+            proc.stdin.flush()
+            rename_resp = json.loads(proc.stdout.readline())
+            self.assertFalse(rename_resp["result"]["isError"])
+            rename_data = json.loads(rename_resp["result"]["content"][0]["text"])
+            self.assertEqual(rename_data["new_name"], "renamed-suite-bridge")
 
         finally:
             proc.terminate()

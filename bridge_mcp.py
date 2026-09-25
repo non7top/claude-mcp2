@@ -692,6 +692,20 @@ class ClaudeMessageBridgeMCP:
                                     "properties": {},
                                     "required": []
                                 }
+                            },
+                            {
+                                "name": "rename_session",
+                                "description": "Renames this bridge's announced session descriptor in ~/.claude/sessions/ so Claude Code instances discover it under the new name via ListAgents.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "new_name": {
+                                            "type": "string",
+                                            "description": "The new session name to announce (e.g. 'antigravity-dev-bridge')"
+                                        }
+                                    },
+                                    "required": ["new_name"]
+                                }
                             }
                         ]
                     }
@@ -725,6 +739,42 @@ class ClaudeMessageBridgeMCP:
                                 "isError": False
                             }
                         })
+                    elif tool_name == "rename_session":
+                        new_name = args.get("new_name")
+                        if not new_name:
+                            write_response({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {
+                                    "content": [
+                                        {"type": "text", "text": "Error: 'new_name' argument is required."}
+                                    ],
+                                    "isError": True
+                                }
+                            })
+                        else:
+                            old_name = getattr(self, "session_name", "antigravity-bridge")
+                            self.cleanup_session_descriptor()
+                            self.session_name = new_name
+                            self.register_session_descriptor(session_name=new_name)
+
+                            res = {
+                                "success": True,
+                                "previous_name": old_name,
+                                "new_name": new_name,
+                                "pid": getattr(self, "registered_pid", os.getpid()),
+                                "descriptor_file": getattr(self, "session_json_path", "")
+                            }
+                            write_response({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {
+                                    "content": [
+                                        {"type": "text", "text": json.dumps(res, indent=2)}
+                                    ],
+                                    "isError": False
+                                }
+                            })
                     elif tool_name == "send_message":
                         target_session = args.get("session")
                         message_text = args.get("message")
