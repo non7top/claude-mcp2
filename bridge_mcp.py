@@ -183,18 +183,37 @@ class ClaudeMessageBridgeMCP:
 
         return None
 
-    def _find_transcript_file(self, session_id: str) -> Optional[str]:
+    def _find_transcript_file(self, session_id: str, cwd: Optional[str] = None) -> Optional[str]:
         if not session_id:
             return None
+
+        # 1. Direct glob match across project folders
         pattern = os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl")
         matches = glob.glob(pattern)
-        return matches[0] if matches else None
+        if matches:
+            return matches[0]
+
+        # 2. Check predicted path from cwd if provided
+        if cwd:
+            sanitized_cwd = cwd.replace("/", "-")
+            predicted_path = os.path.expanduser(f"~/.claude/projects/{sanitized_cwd}/{session_id}.jsonl")
+            if os.path.exists(predicted_path):
+                return predicted_path
+
+        # 3. Recursive glob search across all project directories
+        rec_pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
+        rec_matches = glob.glob(rec_pattern, recursive=True)
+        if rec_matches:
+            return rec_matches[0]
+
+        return None
 
     async def wait_for_assistant_response(
         self,
         session_id: str,
         start_offset: int,
         pid: Optional[int] = None,
+        cwd: Optional[str] = None,
         timeout: float = 60.0
     ) -> Dict[str, Any]:
         """
@@ -202,17 +221,18 @@ class ClaudeMessageBridgeMCP:
         its response turn, then extracts and returns the assistant's response text.
         """
         start_time = asyncio.get_event_loop().time()
-        transcript_file = self._find_transcript_file(session_id)
+        transcript_file = self._find_transcript_file(session_id, cwd=cwd)
 
+        max_wait_file = min(15.0, timeout)
         while not transcript_file:
-            if asyncio.get_event_loop().time() - start_time > 5.0:
+            if asyncio.get_event_loop().time() - start_time > max_wait_file:
                 break
-            await asyncio.sleep(0.3)
-            transcript_file = self._find_transcript_file(session_id)
+            await asyncio.sleep(0.5)
+            transcript_file = self._find_transcript_file(session_id, cwd=cwd)
 
         if not transcript_file or not os.path.exists(transcript_file):
-            logger.warning(f"Transcript file for session {session_id} not found.")
-            return {"completed": False, "content": "", "error": "Transcript file not found"}
+            logger.warning(f"Transcript file for session {session_id} not found on disk.")
+            return {"completed": False, "content": "", "error": f"Transcript file for session '{session_id}' not found on disk"}
 
         collected_texts = []
         turn_completed = False
@@ -276,9 +296,10 @@ class ClaudeMessageBridgeMCP:
         session_id: str,
         start_offset: int,
         pid: Optional[int],
+        cwd: Optional[str],
         timeout: float
     ):
-        resp_data = await self.wait_for_assistant_response(session_id, start_offset, pid, timeout)
+        resp_data = await self.wait_for_assistant_response(session_id, start_offset, pid, cwd, timeout)
         if msg_id in self.response_store:
             self.response_store[msg_id]["status"] = "completed" if resp_data.get("completed") else "timeout"
             self.response_store[msg_id]["response"] = resp_data.get("content", "")
@@ -309,6 +330,7 @@ class ClaudeMessageBridgeMCP:
         token = peer.get("token", "")
         session_id = peer.get("sessionId", "")
         pid = peer.get("pid")
+        cwd = peer.get("cwd")
 
         if not socket_path or not os.path.exists(socket_path):
             logger.error(f"Socket path for '{peer['name']}' does not exist: {socket_path}")
@@ -319,7 +341,7 @@ class ClaudeMessageBridgeMCP:
 
         # Determine start offset in transcript before dispatching
         start_offset = 0
-        tfile = self._find_transcript_file(session_id)
+        tfile = self._find_transcript_file(session_id, cwd=cwd)
         if tfile and os.path.exists(tfile):
             try:
                 start_offset = os.path.getsize(tfile)
@@ -361,6 +383,7 @@ class ClaudeMessageBridgeMCP:
                     session_id=session_id,
                     start_offset=start_offset,
                     pid=pid,
+                    cwd=cwd,
                     timeout=timeout
                 )
                 response_text = resp_data.get("content", "")
@@ -378,7 +401,7 @@ class ClaudeMessageBridgeMCP:
                 }
             else:
                 asyncio.create_task(
-                    self._background_monitor_response(msg_id, session_id, start_offset, pid, timeout)
+                    self._background_monitor_response(msg_id, session_id, start_offset, pid, cwd, timeout)
                 )
                 return {
                     "success": True,

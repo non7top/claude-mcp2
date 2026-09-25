@@ -195,7 +195,7 @@ class TestTranscriptResponseParser(unittest.IsolatedAsyncioTestCase):
         transcript_file = os.path.join(project_dir, f"{session_id}.jsonl")
 
         # Mock _find_transcript_file to return our mock file
-        self.bridge._find_transcript_file = lambda sid: transcript_file
+        self.bridge._find_transcript_file = lambda sid, *args, **kwargs: transcript_file
 
         with open(transcript_file, "w", encoding="utf-8") as f:
             f.write(json.dumps({"type": "user", "message": {"content": "Initial user prompt"}}) + "\n")
