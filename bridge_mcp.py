@@ -179,6 +179,7 @@ class ClaudeMessageBridgeMCP:
                         "socket": sock_path,
                         "token": token,
                         "cwd": cwd,
+                        "kind": meta.get("kind", "interactive"),
                         "updatedAt": meta.get("updatedAt"),
                         "status": meta.get("status", "active")
                     }
@@ -624,6 +625,10 @@ class ClaudeMessageBridgeMCP:
         peer = self._resolve_session(sender)
         if not peer:
             logger.info(f"Sender '{sender}' is not found among active peers. Skipping socket poke back.")
+            return
+
+        if peer.get("kind") != "bg":
+            logger.info(f"Sender '{sender}' is of kind '{peer.get('kind')}' (not 'bg'). Skipping socket poke back to protect interactive sessions.")
             return
 
         socket_path = peer.get("socket")
