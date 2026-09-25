@@ -1116,16 +1116,10 @@ class ClaudeMessageBridgeMCP:
 
     async def run_all(self):
         """
-        Stdio MCP server loop. Ensures a persistent background daemon is running for this session,
-        so that session availability persists across MCP host restarts.
+        Stdio MCP server loop. Registers session descriptor and starts Unix socket listener
+        in-process so that inbound socket notifications route directly over stdout to the MCP host (Antigravity).
         """
-        daemon_active = self.ensure_daemon_running()
-
-        listener_task = None
-        if not daemon_active:
-            logger.warning("Background daemon not active; running in-process listener fallback.")
-            self.register_session_descriptor(session_name=self.session_name, kind="bg")
-            listener_task = asyncio.create_task(self.start_bridge_listener())
+        self.register_session_descriptor(session_name=self.session_name, kind="bg")
 
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -1140,15 +1134,12 @@ class ClaudeMessageBridgeMCP:
             except (NotImplementedError, RuntimeError):
                 pass
 
+        listener_task = asyncio.create_task(self.start_bridge_listener())
         stdio_task = asyncio.create_task(self.mcp_stdio_loop())
         stop_task = asyncio.create_task(stop_event.wait())
 
-        tasks = [stdio_task, stop_task]
-        if listener_task:
-            tasks.append(listener_task)
-
         done, pending = await asyncio.wait(
-            tasks,
+            [listener_task, stdio_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED
         )
 
@@ -1159,9 +1150,8 @@ class ClaudeMessageBridgeMCP:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        if listener_task:
-            self.cleanup_session_descriptor()
-            self.cleanup_socket()
+        self.cleanup_session_descriptor()
+        self.cleanup_socket()
         logger.info("Bridge stdio handler shut down gracefully.")
 
 def main():
