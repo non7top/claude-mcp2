@@ -26,7 +26,7 @@ class ClaudeMessageBridgeMCP:
         self,
         bridge_socket_path: Optional[str] = None,
         session_name: Optional[str] = None,
-        auto_reply: bool = False
+        auto_reply: bool = True
     ):
         self.pid = os.getpid()
         self.home_dir = os.path.expanduser("~")
@@ -1051,8 +1051,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Default auto_reply to True when standalone mode is active, unless explicitly disabled
-    auto_reply_setting = args.auto_reply if args.auto_reply is not None else args.standalone
+    # Default auto_reply to True for all bridge instances, unless explicitly disabled
+    auto_reply_setting = True if args.auto_reply is None else args.auto_reply
 
     bridge = ClaudeMessageBridgeMCP(
         bridge_socket_path=args.socket,
