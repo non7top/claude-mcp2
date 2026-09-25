@@ -367,7 +367,72 @@ class ClaudeMessageBridgeMCP:
 
         except Exception as e:
             logger.error(f"IPC injection crash sending to {socket_path}: {e}")
-            return {"success": False, "error": f"IPC injection crash: {str(e)}"}
+    def register_session_descriptor(self, session_name: str = "antigravity-bridge"):
+        """
+        Registers a session descriptor in ~/.claude/sessions/ so that surrounding
+        Claude Code processes can discover and message this bridge via ListAgents.
+        """
+        if not os.path.exists(self.sessions_dir):
+            try:
+                os.makedirs(self.sessions_dir, exist_ok=True)
+            except OSError as e:
+                logger.error(f"Failed to create sessions directory: {e}")
+                return
+
+        self.registered_pid = os.getpid()
+        self.registered_session_id = str(uuid.uuid4())
+        self.registered_token = uuid.uuid4().hex
+        now = int(time.time() * 1000)
+
+        self.session_json_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.json")
+        self.session_key_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.{self.registered_token[:16]}.key")
+
+        session_data = {
+            "pid": self.registered_pid,
+            "sessionId": self.registered_session_id,
+            "cwd": os.getcwd(),
+            "startedAt": now,
+            "procStart": str(self.registered_pid),
+            "version": "2.1.282",
+            "peerProtocol": 1,
+            "peerFeatures": ["notify_idle", "reply_across_default_dirs", "artifact_yield"],
+            "kind": "interactive",
+            "entrypoint": "cli",
+            "pidDomain": f"linux:local:pid:[{self.registered_pid}]",
+            "messagingSocketPath": self.bridge_socket_path,
+            "name": session_name,
+            "nameSource": "user",
+            "nameSince": now,
+            "status": "idle",
+            "updatedAt": now,
+            "statusUpdatedAt": now
+        }
+
+        key_data = {
+            "peerToken": self.registered_token,
+            "procStart": str(self.registered_pid)
+        }
+
+        try:
+            with open(self.session_json_path, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, indent=2)
+            with open(self.session_key_path, "w", encoding="utf-8") as f:
+                json.dump(key_data, f, indent=2)
+            logger.info(f"🚀 Registered bridge session descriptor '{session_name}' (PID {self.registered_pid}) in {self.sessions_dir}")
+        except Exception as e:
+            logger.error(f"Failed to register session descriptor: {e}")
+
+    def cleanup_session_descriptor(self):
+        """
+        Cleans up the bridge's registered session descriptor and key files on shutdown.
+        """
+        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None)]:
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                    logger.info(f"Cleaned up session descriptor file: {p}")
+                except OSError as e:
+                    logger.error(f"Failed to remove descriptor file {p}: {e}")
 
     async def handle_inbound_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
@@ -677,6 +742,9 @@ class ClaudeMessageBridgeMCP:
                 logger.error(f"Error removing socket file {self.bridge_socket_path}: {e}")
 
     async def run_all(self):
+        # Register session descriptor so Claude Code instances discover us via ListAgents
+        self.register_session_descriptor(session_name="antigravity-bridge")
+
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
 
@@ -706,6 +774,7 @@ class ClaudeMessageBridgeMCP:
             except (asyncio.CancelledError, Exception):
                 pass
 
+        self.cleanup_session_descriptor()
         self.cleanup_socket()
         logger.info("Bridge daemon shut down gracefully.")
 
