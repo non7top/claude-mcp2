@@ -39,23 +39,41 @@ A Model Context Protocol (MCP) execution bridge built for **Google Antigravity**
 
 ## 📦 Installation & Setup
 
+### Option 1: Via `uvx` (Recommended - Zero Installation)
+
+Register directly with **Antigravity CLI (`agy`)** from GitHub without cloning:
+
+```bash
+agy mcp add claudemessaging uvx --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
+```
+
+Or run directly via `uvx`:
+
+```bash
+uvx --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
+```
+
+---
+
+### Option 2: Local Repository Installation
+
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/non7top/claude-mcp2.git
    cd claude-mcp2
    ```
 
-2. **Make the script executable**:
+2. **Register with Antigravity CLI (`agy`) using `uvx`**:
    ```bash
-   chmod +x bridge_mcp.py
+   agy mcp add claudemessaging uvx --from . bridge-mcp
    ```
 
-3. **Register with Antigravity CLI (`agy`)**:
+3. **Or register with standard `python3`**:
    ```bash
    agy mcp add claudemessaging python3 $(pwd)/bridge_mcp.py
    ```
 
-4. **Verify MCP server registration**:
+4. **Verify registration**:
    ```bash
    agy mcp list
    ```
