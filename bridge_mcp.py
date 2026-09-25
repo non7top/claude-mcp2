@@ -457,6 +457,22 @@ class ClaudeMessageBridgeMCP:
                 except OSError as e:
                     logger.error(f"Failed to remove descriptor file {p}: {e}")
 
+    def notify_mcp_host(self, method: str, params: Dict[str, Any]):
+        """
+        Emits an asynchronous MCP JSON-RPC notification line over stdout to notify the host (agy).
+        """
+        notification = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }
+        try:
+            sys.stdout.write(json.dumps(notification) + "\n")
+            sys.stdout.flush()
+            logger.info(f"Poked MCP host with notification '{method}': {params.get('msg_id')}")
+        except Exception as e:
+            logger.error(f"Failed to write MCP notification to stdout: {e}")
+
     async def handle_inbound_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
         Manages inbound response tracking. Listens for external peer confirmations
@@ -497,6 +513,17 @@ class ClaudeMessageBridgeMCP:
                         "timestamp": time.time()
                     }
                     logger.info(f"Buffered inbound response frame: {msg_id}")
+
+                    # Notify agy host continuously in background over stdout
+                    self.notify_mcp_host(
+                        method="notifications/message",
+                        params={
+                            "msg_id": msg_id,
+                            "sender": sender,
+                            "content": content_val,
+                            "timestamp": time.time()
+                        }
+                    )
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
                     writer.write(ack.encode("utf-8"))
