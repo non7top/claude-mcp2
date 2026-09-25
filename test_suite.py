@@ -8,6 +8,7 @@ import json
 import time
 import glob
 import uuid
+import signal
 import asyncio
 import tempfile
 import unittest
@@ -214,6 +215,14 @@ class TestMCPStdioProtocol(unittest.TestCase):
         script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "bridge_mcp.py"))
         socket_path = f"/tmp/test_rpc_{uuid.uuid4().hex[:8]}.sock"
 
+        # Running the stdio server without --name now spawns a persistent standalone
+        # daemon by default (so a session survives an MCP host restart). Snapshot the
+        # descriptor directory beforehand so the daemon (and any descriptor files it
+        # or a rename_session call creates) can be torn down after the test instead
+        # of leaking a background process.
+        sessions_dir = os.path.expanduser("~/.claude/sessions")
+        pre_existing_descriptors = set(glob.glob(os.path.join(sessions_dir, "*.json")))
+
         proc = subprocess.Popen(
             [sys.executable, script_path, "--socket", socket_path],
             stdin=subprocess.PIPE,
@@ -272,10 +281,36 @@ class TestMCPStdioProtocol(unittest.TestCase):
 
         finally:
             proc.terminate()
-            proc.wait(timeout=2)
+            proc.wait(timeout=5)
             if os.path.exists(socket_path):
                 try:
                     os.remove(socket_path)
+                except OSError:
+                    pass
+
+            # Tear down any persistent daemon (and its descriptor/key files) that this
+            # test's stdio process spawned or renamed, so the suite doesn't leak a
+            # background bridge process into the developer's real session list.
+            new_descriptors = set(glob.glob(os.path.join(sessions_dir, "*.json"))) - pre_existing_descriptors
+            for descriptor_path in new_descriptors:
+                try:
+                    with open(descriptor_path, "r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                except (OSError, json.JSONDecodeError):
+                    continue
+                daemon_pid = meta.get("pid")
+                if daemon_pid:
+                    try:
+                        os.kill(daemon_pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                for stray in glob.glob(os.path.join(sessions_dir, f"{daemon_pid}.*")):
+                    try:
+                        os.remove(stray)
+                    except OSError:
+                        pass
+                try:
+                    os.remove(descriptor_path)
                 except OSError:
                     pass
 
