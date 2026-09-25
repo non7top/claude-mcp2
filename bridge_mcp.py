@@ -33,34 +33,82 @@ class ClaudeMessageBridgeMCP:
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
         self.auto_reply = auto_reply
 
+        env_name = os.environ.get("AGY_SESSION_NAME")
+        self.session_name = session_name or env_name or "antigravity-bridge"
+
         env_socket = os.environ.get("AGY_MCP_BRIDGE_SOCKET")
         if bridge_socket_path:
             self.bridge_socket_path = bridge_socket_path
         elif env_socket:
             self.bridge_socket_path = env_socket
         else:
-            self.bridge_socket_path = self._get_default_socket_path(self.pid)
-
-        env_name = os.environ.get("AGY_SESSION_NAME")
-        self.session_name = session_name or env_name or "antigravity-bridge"
+            self.bridge_socket_path = self._get_default_socket_path(self.pid, self.session_name)
 
         # Historical datastore for storing response payloads
         self.response_store: Dict[str, Dict[str, Any]] = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
 
-    def _get_default_socket_path(self, pid: int) -> str:
+    def _get_default_socket_path(self, pid: int, session_name: Optional[str] = None) -> str:
+        sname = (session_name or getattr(self, "session_name", "antigravity-bridge")).replace("/", "-")
         try:
             uid = os.getuid()
             cc_socks_dir = f"/run/user/{uid}/cc-socks"
             if os.path.exists(cc_socks_dir) and os.access(cc_socks_dir, os.W_OK):
-                return os.path.join(cc_socks_dir, f"{pid}.sock")
+                return os.path.join(cc_socks_dir, f"bridge-{sname}.sock")
 
             fallback_dir = "/tmp/cc-socks"
             os.makedirs(fallback_dir, exist_ok=True)
-            return os.path.join(fallback_dir, f"{pid}.sock")
+            return os.path.join(fallback_dir, f"bridge-{sname}.sock")
         except Exception:
             pass
-        return f"/tmp/agy_mcp_bridge_{pid}.sock"
+        return f"/tmp/bridge_{sname}.sock"
+
+    def ensure_daemon_running(self) -> bool:
+        """
+        Ensures a persistent background daemon for this session name is running.
+        If not running, spawns a detached background process.
+        """
+        sanitized_name = self.session_name.replace("/", "-")
+        descriptor_path = os.path.join(self.sessions_dir, f"bridge-{sanitized_name}.json")
+
+        if os.path.exists(descriptor_path):
+            try:
+                with open(descriptor_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                pid = meta.get("pid")
+                sock_path = meta.get("messagingSocketPath")
+                if pid and self._is_pid_alive(pid) and sock_path and os.path.exists(sock_path):
+                    logger.info(f"Background bridge daemon '{self.session_name}' is active (PID {pid}).")
+                    return True
+            except Exception as e:
+                logger.warning(f"Error reading daemon descriptor {descriptor_path}: {e}")
+
+        # Daemon is not running; spawn detached background process
+        if sys.argv[0].endswith("bridge-mcp"):
+            cmd = ["bridge-mcp", "--standalone", "--name", self.session_name, "--socket", self.bridge_socket_path]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--standalone", "--name", self.session_name, "--socket", self.bridge_socket_path]
+
+        logger.info(f"🚀 Spawning persistent background bridge daemon: {' '.join(cmd)}")
+        try:
+            subprocess.Popen(
+                cmd,
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            start_wait = time.time()
+            while time.time() - start_wait < 3.0:
+                if os.path.exists(descriptor_path):
+                    time.sleep(0.2)
+                    return True
+                time.sleep(0.1)
+        except Exception as spawn_err:
+            logger.error(f"Failed to spawn background daemon: {spawn_err}")
+            return False
+
+        return os.path.exists(descriptor_path)
 
     def _is_pid_alive(self, pid: Optional[int]) -> bool:
         if not pid or not isinstance(pid, int):
