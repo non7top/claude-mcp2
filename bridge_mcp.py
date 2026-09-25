@@ -520,7 +520,7 @@ class ClaudeMessageBridgeMCP:
         except Exception as e:
             logger.error(f"Failed to append to bridge transcript file: {e}")
 
-    def register_session_descriptor(self, session_name: str = "antigravity-bridge"):
+    def register_session_descriptor(self, session_name: str = "antigravity-bridge", kind: str = "bg"):
         """
         Registers a session descriptor in ~/.claude/sessions/ so that surrounding
         Claude Code processes can discover and message this bridge via ListAgents.
@@ -537,11 +537,12 @@ class ClaudeMessageBridgeMCP:
         self.registered_token = uuid.uuid4().hex
         now = int(time.time() * 1000)
 
+        sanitized_name = session_name.replace("/", "-")
         self.session_json_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.json")
         self.session_key_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.{self.registered_token[:16]}.key")
+        self.named_descriptor_path = os.path.join(self.sessions_dir, f"bridge-{sanitized_name}.json")
 
         # Create a dedicated bridge transcript directory and file
-        sanitized_name = session_name.replace("/", "-")
         self.bridge_transcript_dir = os.path.expanduser(f"~/.claude/projects/-bridge-session-{sanitized_name}")
         os.makedirs(self.bridge_transcript_dir, exist_ok=True)
         self.bridge_transcript_path = os.path.join(self.bridge_transcript_dir, f"{self.registered_session_id}.jsonl")
@@ -555,7 +556,7 @@ class ClaudeMessageBridgeMCP:
             "version": "2.1.282",
             "peerProtocol": 1,
             "peerFeatures": ["notify_idle", "reply_across_default_dirs", "artifact_yield"],
-            "kind": "interactive",
+            "kind": kind,
             "entrypoint": "cli",
             "pidDomain": f"linux:local:pid:[{self.registered_pid}]",
             "messagingSocketPath": self.bridge_socket_path,
@@ -575,6 +576,8 @@ class ClaudeMessageBridgeMCP:
         try:
             with open(self.session_json_path, "w", encoding="utf-8") as f:
                 json.dump(session_data, f, indent=2)
+            with open(self.named_descriptor_path, "w", encoding="utf-8") as f:
+                json.dump(session_data, f, indent=2)
             with open(self.session_key_path, "w", encoding="utf-8") as f:
                 json.dump(key_data, f, indent=2)
             logger.info(f"🚀 Registered bridge session descriptor '{session_name}' (PID {self.registered_pid}) in {self.sessions_dir}")
@@ -585,7 +588,7 @@ class ClaudeMessageBridgeMCP:
         """
         Cleans up the bridge's registered session descriptor, key files, and transcript files on shutdown.
         """
-        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None), getattr(self, "bridge_transcript_path", None)]:
+        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None), getattr(self, "bridge_transcript_path", None), getattr(self, "named_descriptor_path", None)]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
@@ -1077,7 +1080,7 @@ class ClaudeMessageBridgeMCP:
         Runs the bridge as a standalone daemon server without the stdio MCP loop.
         Registers session descriptor and listens on Unix domain socket for inbound messages.
         """
-        self.register_session_descriptor(session_name=self.session_name)
+        self.register_session_descriptor(session_name=self.session_name, kind="bg")
 
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -1112,8 +1115,17 @@ class ClaudeMessageBridgeMCP:
         logger.info("Bridge standalone daemon shut down gracefully.")
 
     async def run_all(self):
-        # Register session descriptor so Claude Code instances discover us via ListAgents
-        self.register_session_descriptor(session_name=self.session_name)
+        """
+        Stdio MCP server loop. Ensures a persistent background daemon is running for this session,
+        so that session availability persists across MCP host restarts.
+        """
+        daemon_active = self.ensure_daemon_running()
+
+        listener_task = None
+        if not daemon_active:
+            logger.warning("Background daemon not active; running in-process listener fallback.")
+            self.register_session_descriptor(session_name=self.session_name, kind="bg")
+            listener_task = asyncio.create_task(self.start_bridge_listener())
 
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -1128,12 +1140,15 @@ class ClaudeMessageBridgeMCP:
             except (NotImplementedError, RuntimeError):
                 pass
 
-        listener_task = asyncio.create_task(self.start_bridge_listener())
         stdio_task = asyncio.create_task(self.mcp_stdio_loop())
         stop_task = asyncio.create_task(stop_event.wait())
 
+        tasks = [stdio_task, stop_task]
+        if listener_task:
+            tasks.append(listener_task)
+
         done, pending = await asyncio.wait(
-            [listener_task, stdio_task, stop_task],
+            tasks,
             return_when=asyncio.FIRST_COMPLETED
         )
 
@@ -1144,9 +1159,10 @@ class ClaudeMessageBridgeMCP:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        self.cleanup_session_descriptor()
-        self.cleanup_socket()
-        logger.info("Bridge daemon shut down gracefully.")
+        if listener_task:
+            self.cleanup_session_descriptor()
+            self.cleanup_socket()
+        logger.info("Bridge stdio handler shut down gracefully.")
 
 def main():
     parser = argparse.ArgumentParser(description="Claude Message Bridge MCP Server & Standalone CLI Tool")
