@@ -787,8 +787,11 @@ class ClaudeMessageBridgeMCP:
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
         def write_response(resp: dict):
-            sys.stdout.write(json.dumps(resp) + "\n")
-            sys.stdout.flush()
+            try:
+                sys.stdout.write(json.dumps(resp) + "\n")
+                sys.stdout.flush()
+            except (BrokenPipeError, OSError):
+                logger.warning("MCP host stdout pipe closed; cannot write response.")
 
         while True:
             line = await reader.readline()
