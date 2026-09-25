@@ -131,16 +131,48 @@ Renames this bridge's announced session descriptor in `~/.claude/sessions/` so s
 
 ---
 
+## 🖥️ Standalone Daemon & CLI Mode
+
+In addition to standard stdio MCP mode, `bridge_mcp.py` can be launched in **standalone mode** (as a persistent background daemon or command-line execution tool):
+
+### Standalone Daemon Server
+Run the bridge as a background service without stdio MCP binding:
+```bash
+bridge-mcp --standalone --name custom-bridge-name
+```
+Or with `python3`:
+```bash
+python3 bridge_mcp.py --standalone --name custom-bridge-name
+```
+
+### Command-Line Execution Tools
+Execute single-shot operations directly from terminal:
+
+* **List Active Sessions**:
+  ```bash
+  bridge-mcp --list
+  ```
+* **Proactively Purge Dead Sessions**:
+  ```bash
+  bridge-mcp --purge
+  ```
+* **Send Message to Session**:
+  ```bash
+  bridge-mcp --send rgle "Hello from CLI"
+  ```
+* **Send Asynchronously (`--no-wait`)**:
+  ```bash
+  bridge-mcp --send rgle "Long running background task" --no-wait
+  ```
+
+---
+
 ## ⚙️ Running Tests
 
-Run the included unit and stdio protocol integration test suites:
+Run the included unit and integration test suites:
 
 ```bash
-# Run unit test suite
-python3 -m unittest discover -s . -p "test*.py"
-
-# Run stdio JSON-RPC protocol test
-python3 /path/to/test_mcp_stdio.py
+python3 test_suite.py
 ```
 
 ---

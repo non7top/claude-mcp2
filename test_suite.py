@@ -280,5 +280,59 @@ class TestMCPStdioProtocol(unittest.TestCase):
                     pass
 
 
+class TestBridgeStandaloneCLI(unittest.TestCase):
+    def setUp(self):
+        self.script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "bridge_mcp.py"))
+
+    def test_cli_list(self):
+        """Verify python3 bridge_mcp.py --list executes and returns valid JSON."""
+        res = subprocess.run(
+            [sys.executable, self.script_path, "--list"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0)
+        data = json.loads(res.stdout)
+        self.assertIsInstance(data, dict)
+
+    def test_cli_purge(self):
+        """Verify python3 bridge_mcp.py --purge executes successfully."""
+        res = subprocess.run(
+            [sys.executable, self.script_path, "--purge"],
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Purge scan completed", res.stdout)
+
+    def test_cli_standalone_daemon(self):
+        """Verify python3 bridge_mcp.py --standalone starts and stops gracefully on SIGTERM."""
+        socket_path = f"/tmp/test_standalone_{uuid.uuid4().hex[:8]}.sock"
+        proc = subprocess.Popen(
+            [sys.executable, self.script_path, "--standalone", "--socket", socket_path, "--name", "test-standalone-daemon"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        try:
+            time.sleep(1.0)
+            self.assertTrue(os.path.exists(socket_path))
+            proc.terminate()
+            stdout, stderr = proc.communicate(timeout=3)
+            self.assertEqual(proc.returncode, 0)
+            self.assertIn("Bridge standalone daemon shut down gracefully", stderr)
+            self.assertFalse(os.path.exists(socket_path))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            if os.path.exists(socket_path):
+                try:
+                    os.remove(socket_path)
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -859,6 +859,45 @@ class ClaudeMessageBridgeMCP:
             except OSError as e:
                 logger.error(f"Error removing socket file {self.bridge_socket_path}: {e}")
 
+    async def run_standalone(self):
+        """
+        Runs the bridge as a standalone daemon server without the stdio MCP loop.
+        Registers session descriptor and listens on Unix domain socket for inbound messages.
+        """
+        self.register_session_descriptor(session_name=self.session_name)
+
+        loop = asyncio.get_running_loop()
+        stop_event = asyncio.Event()
+
+        def _handle_signal():
+            logger.info("Termination signal received. Initiating graceful shutdown...")
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _handle_signal)
+            except (NotImplementedError, RuntimeError):
+                pass
+
+        listener_task = asyncio.create_task(self.start_bridge_listener())
+        stop_task = asyncio.create_task(stop_event.wait())
+
+        done, pending = await asyncio.wait(
+            [listener_task, stop_task],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        self.cleanup_session_descriptor()
+        self.cleanup_socket()
+        logger.info("Bridge standalone daemon shut down gracefully.")
+
     async def run_all(self):
         # Register session descriptor so Claude Code instances discover us via ListAgents
         self.register_session_descriptor(session_name=self.session_name)
@@ -897,19 +936,73 @@ class ClaudeMessageBridgeMCP:
         logger.info("Bridge daemon shut down gracefully.")
 
 def main():
-    parser = argparse.ArgumentParser(description="Claude Message Bridge MCP Server")
+    parser = argparse.ArgumentParser(description="Claude Message Bridge MCP Server & Standalone CLI Tool")
     parser.add_argument("--socket", type=str, default=None, help="Path to bridge Unix socket")
     parser.add_argument("--name", type=str, default="antigravity-bridge", help="Session name announced to Claude Code")
+
+    mode_group = parser.add_argument_group("Execution Modes")
+    mode_group.add_argument("--standalone", "--daemon", action="store_true", help="Run as standalone daemon server without stdio MCP loop")
+    mode_group.add_argument("--list", action="store_true", help="List all active Claude Code sessions")
+    mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
+    mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
+
+    send_group = parser.add_argument_group("Send Options")
+    send_group.add_argument("--no-wait", action="store_true", help="Do not wait for assistant response turn when sending message")
+    send_group.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds for response turn completion (default: 60)")
+
     args = parser.parse_args()
 
     bridge = ClaudeMessageBridgeMCP(bridge_socket_path=args.socket, session_name=args.name)
-    try:
-        asyncio.run(bridge.run_all())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutting down bridge daemon gracefully.")
-    except Exception as e:
-        logger.error(f"Fatal server error: {e}")
+
+    if args.list:
+        async def _cmd_list():
+            peers = await bridge.verify_and_purge_sessions()
+            print(json.dumps(peers, indent=2))
+        asyncio.run(_cmd_list())
         sys.exit(0)
+
+    elif args.purge:
+        async def _cmd_purge():
+            peers = await bridge.verify_and_purge_sessions()
+            print(f"Purge scan completed. Active sessions remaining: {len(peers)}")
+        asyncio.run(_cmd_purge())
+        sys.exit(0)
+
+    elif args.send:
+        target_session, message_text = args.send[0], args.send[1]
+        should_wait = not args.no_wait
+        timeout_val = args.timeout
+
+        async def _cmd_send():
+            res = await bridge.send_to_claude(
+                session_identifier=target_session,
+                message_content=message_text,
+                wait_for_response=should_wait,
+                timeout=timeout_val
+            )
+            print(json.dumps(res, indent=2))
+            if not res.get("success"):
+                sys.exit(1)
+        asyncio.run(_cmd_send())
+        sys.exit(0)
+
+    elif args.standalone:
+        try:
+            asyncio.run(bridge.run_standalone())
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Shutting down standalone bridge daemon gracefully.")
+        except Exception as e:
+            logger.error(f"Fatal standalone server error: {e}")
+            sys.exit(0)
+
+    else:
+        try:
+            asyncio.run(bridge.run_all())
+        except (KeyboardInterrupt, SystemExit):
+            logger.info("Shutting down bridge daemon gracefully.")
+        except Exception as e:
+            logger.error(f"Fatal server error: {e}")
+            sys.exit(0)
 
 if __name__ == "__main__":
     main()
