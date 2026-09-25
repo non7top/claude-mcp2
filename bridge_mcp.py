@@ -613,6 +613,52 @@ class ClaudeMessageBridgeMCP:
         except Exception as e:
             logger.error(f"Failed to write MCP notification to stdout: {e}")
 
+    async def poke_back_sender(self, sender: str, reply_content: str):
+        """
+        Dispatches an outbound IPC response frame back to the sender's Unix domain socket.
+        """
+        if not sender or sender.lower() in ["unknown", "none", self.session_name.lower()]:
+            return
+
+        await self.verify_and_purge_sessions()
+        peer = self._resolve_session(sender)
+        if not peer:
+            logger.info(f"Sender '{sender}' is not found among active peers. Skipping socket poke back.")
+            return
+
+        socket_path = peer.get("socket")
+        token = peer.get("token", "")
+        if not socket_path or not os.path.exists(socket_path):
+            logger.warning(f"Sender socket '{socket_path}' for '{sender}' is not reachable.")
+            return
+
+        auth_frame = {"type": "auth", "peerToken": token}
+        msg_id = f"msg_reply_{uuid.uuid4()}"
+        message_frame = {
+            "type": "user",
+            "message": {"role": "user", "content": reply_content},
+            "priority": "next",
+            "msg_id": msg_id,
+            "sender": self.session_name
+        }
+
+        try:
+            reader, writer = await asyncio.open_unix_connection(socket_path)
+            writer.write((json.dumps(auth_frame) + "\n").encode("utf-8"))
+            writer.write((json.dumps(message_frame) + "\n").encode("utf-8"))
+            await writer.drain()
+
+            try:
+                await asyncio.wait_for(reader.readline(), timeout=2.0)
+            except Exception:
+                pass
+
+            writer.close()
+            await writer.wait_closed()
+            logger.info(f"🚀 Poked back sender '{sender}' over UNIX socket {socket_path} with reply frame.")
+        except Exception as e:
+            logger.error(f"Failed to poke back sender '{sender}': {e}")
+
     async def handle_inbound_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
         Manages inbound response tracking. Listens for external peer confirmations
@@ -668,6 +714,11 @@ class ClaudeMessageBridgeMCP:
                             "timestamp": time.time()
                         }
                     )
+                    self.notify_mcp_host(method="notifications/tools/list_changed", params={})
+
+                    # Poke back sender session on its Unix domain socket
+                    if reply_text and sender and sender.lower() not in ["unknown", "none", self.session_name.lower()]:
+                        asyncio.create_task(self.poke_back_sender(sender=sender, reply_content=reply_text))
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
                     try:
