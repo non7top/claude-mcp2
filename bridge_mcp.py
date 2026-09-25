@@ -115,13 +115,18 @@ class ClaudeMessageBridgeMCP:
 
         logger.info(f"🚀 Spawning persistent background bridge daemon: {' '.join(cmd)}")
         try:
-            subprocess.Popen(
-                cmd,
+            daemon_proc = await asyncio.create_subprocess_exec(
+                *cmd,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
+            # This process is meant to fully outlive us - don't await it here - but
+            # something must eventually reap it via waitpid() or it sits as a zombie
+            # (which still passes psutil.pid_exists()/kill(pid, 0) checks) once it
+            # actually exits, for as long as this stdio process stays alive.
+            asyncio.create_task(daemon_proc.wait())
             start_wait = time.time()
             while time.time() - start_wait < 3.0:
                 if os.path.exists(descriptor_path):
@@ -138,12 +143,13 @@ class ClaudeMessageBridgeMCP:
         if not pid or not isinstance(pid, int):
             return False
         try:
-            if psutil.pid_exists(pid):
-                try:
-                    os.kill(pid, 0)
-                    return True
-                except (OSError, ProcessLookupError):
-                    return False
+            # A zombie still satisfies psutil.pid_exists()/os.kill(pid, 0) - it occupies
+            # a process table entry until its parent reaps it - so either check alone
+            # can report a daemon we just killed as still "alive" indefinitely. Check
+            # its actual status too.
+            proc = psutil.Process(pid)
+            return proc.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
         except Exception:
             return False
@@ -791,6 +797,13 @@ class ClaudeMessageBridgeMCP:
                 raise
             except Exception as e:
                 logger.warning(f"Lost connection to persistent daemon, retrying in {backoff:.0f}s: {e}")
+                # The daemon may have actually died rather than just hiccuped - try to
+                # respawn/reattach so this relay self-heals instead of retrying forever
+                # against a socket nobody will ever answer on again.
+                try:
+                    await self.ensure_daemon_running()
+                except Exception:
+                    pass
 
             if writer:
                 try:
