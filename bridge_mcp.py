@@ -22,10 +22,16 @@ logging.basicConfig(
 logger = logging.getLogger("SocketBridgeMCP")
 
 class ClaudeMessageBridgeMCP:
-    def __init__(self, bridge_socket_path: Optional[str] = None, session_name: Optional[str] = None):
+    def __init__(
+        self,
+        bridge_socket_path: Optional[str] = None,
+        session_name: Optional[str] = None,
+        auto_reply: bool = False
+    ):
         self.pid = os.getpid()
         self.home_dir = os.path.expanduser("~")
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
+        self.auto_reply = auto_reply
 
         env_socket = os.environ.get("AGY_MCP_BRIDGE_SOCKET")
         if bridge_socket_path:
@@ -355,7 +361,8 @@ class ClaudeMessageBridgeMCP:
             "type": "user",
             "message": {"role": "user", "content": message_content},
             "priority": "next",
-            "msg_id": msg_id
+            "msg_id": msg_id,
+            "sender": self.session_name
         }
 
         try:
@@ -363,6 +370,14 @@ class ClaudeMessageBridgeMCP:
             writer.write((json.dumps(auth_frame) + "\n").encode("utf-8"))
             writer.write((json.dumps(message_frame) + "\n").encode("utf-8"))
             await writer.drain()
+
+            try:
+                ack_line = await asyncio.wait_for(reader.readline(), timeout=2.0)
+                if ack_line:
+                    logger.info(f"Received instant ACK from {peer['name']}: {ack_line.decode('utf-8').strip()}")
+            except (asyncio.TimeoutError, Exception):
+                pass
+
             writer.close()
             await writer.wait_closed()
 
@@ -413,6 +428,49 @@ class ClaudeMessageBridgeMCP:
 
         except Exception as e:
             logger.error(f"IPC injection crash sending to {socket_path}: {e}")
+            return {
+                "success": False,
+                "error": f"Failed to send message over Unix socket to {socket_path}: {e}"
+            }
+
+    def record_inbound_turn(self, sender: str, content: str, reply_text: Optional[str] = None):
+        """
+        Records inbound message turn into the bridge transcript file
+        so querying processes can read turns and responses seamlessly.
+        """
+        if not getattr(self, "bridge_transcript_path", None):
+            return
+
+        try:
+            with open(self.bridge_transcript_path, "a", encoding="utf-8") as f:
+                user_turn = {
+                    "type": "user",
+                    "message": {"role": "user", "content": content},
+                    "sender": sender,
+                    "timestamp": time.time()
+                }
+                f.write(json.dumps(user_turn) + "\n")
+
+                if reply_text:
+                    assistant_turn = {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": reply_text}]
+                        },
+                        "timestamp": time.time()
+                    }
+                    duration_turn = {
+                        "type": "system",
+                        "subtype": "turn_duration",
+                        "durationMs": 100,
+                        "timestamp": time.time()
+                    }
+                    f.write(json.dumps(assistant_turn) + "\n")
+                    f.write(json.dumps(duration_turn) + "\n")
+        except Exception as e:
+            logger.error(f"Failed to append to bridge transcript file: {e}")
+
     def register_session_descriptor(self, session_name: str = "antigravity-bridge"):
         """
         Registers a session descriptor in ~/.claude/sessions/ so that surrounding
@@ -432,6 +490,12 @@ class ClaudeMessageBridgeMCP:
 
         self.session_json_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.json")
         self.session_key_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.{self.registered_token[:16]}.key")
+
+        # Create a dedicated bridge transcript directory and file
+        sanitized_name = session_name.replace("/", "-")
+        self.bridge_transcript_dir = os.path.expanduser(f"~/.claude/projects/-bridge-session-{sanitized_name}")
+        os.makedirs(self.bridge_transcript_dir, exist_ok=True)
+        self.bridge_transcript_path = os.path.join(self.bridge_transcript_dir, f"{self.registered_session_id}.jsonl")
 
         session_data = {
             "pid": self.registered_pid,
@@ -470,13 +534,13 @@ class ClaudeMessageBridgeMCP:
 
     def cleanup_session_descriptor(self):
         """
-        Cleans up the bridge's registered session descriptor and key files on shutdown.
+        Cleans up the bridge's registered session descriptor, key files, and transcript files on shutdown.
         """
-        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None)]:
+        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None), getattr(self, "bridge_transcript_path", None)]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
-                    logger.info(f"Cleaned up session descriptor file: {p}")
+                    logger.info(f"Cleaned up session file: {p}")
                 except OSError as e:
                     logger.error(f"Failed to remove descriptor file {p}: {e}")
 
@@ -537,6 +601,10 @@ class ClaudeMessageBridgeMCP:
                     }
                     logger.info(f"Buffered inbound response frame: {msg_id}")
 
+                    # Generate auto-reply turn if enabled
+                    reply_text = f"Pong! Received: '{content_val}'" if self.auto_reply else None
+                    self.record_inbound_turn(sender=sender, content=content_val, reply_text=reply_text)
+
                     # Notify agy host continuously in background over stdout
                     self.notify_mcp_host(
                         method="notifications/message",
@@ -549,10 +617,16 @@ class ClaudeMessageBridgeMCP:
                     )
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
-                    writer.write(ack.encode("utf-8"))
-                    await writer.drain()
+                    try:
+                        writer.write(ack.encode("utf-8"))
+                        await writer.drain()
+                    except (ConnectionResetError, BrokenPipeError):
+                        pass
+
                 except json.JSONDecodeError:
                     logger.error("Received invalid JSON payload over inbound bridge socket")
+        except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
+            logger.info("Inbound peer connection closed.")
         except Exception as e:
             logger.error(f"Error handling inbound traffic: {e}")
         finally:
@@ -969,13 +1043,22 @@ def main():
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
-    send_group = parser.add_argument_group("Send Options")
+    send_group = parser.add_argument_group("Send & Server Options")
     send_group.add_argument("--no-wait", action="store_true", help="Do not wait for assistant response turn when sending message")
     send_group.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds for response turn completion (default: 60)")
+    send_group.add_argument("--auto-reply", action="store_true", default=None, help="Enable automatic pong response turns for inbound messages (default: true for standalone mode)")
+    send_group.add_argument("--no-auto-reply", action="store_false", dest="auto_reply", help="Disable automatic pong response turns")
 
     args = parser.parse_args()
 
-    bridge = ClaudeMessageBridgeMCP(bridge_socket_path=args.socket, session_name=args.name)
+    # Default auto_reply to True when standalone mode is active, unless explicitly disabled
+    auto_reply_setting = args.auto_reply if args.auto_reply is not None else args.standalone
+
+    bridge = ClaudeMessageBridgeMCP(
+        bridge_socket_path=args.socket,
+        session_name=args.name,
+        auto_reply=auto_reply_setting
+    )
 
     if args.list:
         async def _cmd_list():

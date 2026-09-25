@@ -333,6 +333,43 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_cli_standalone_ping_pong(self):
+        """Verify python3 bridge_mcp.py --send receives auto-reply turn from standalone daemon."""
+        socket_path = f"/tmp/test_pingpong_{uuid.uuid4().hex[:8]}.sock"
+        daemon_name = f"suite-daemon-{uuid.uuid4().hex[:6]}"
+
+        proc = subprocess.Popen(
+            [sys.executable, self.script_path, "--standalone", "--socket", socket_path, "--name", daemon_name, "--auto-reply"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        try:
+            time.sleep(1.0)
+            self.assertTrue(os.path.exists(socket_path))
+
+            # Send message to the daemon using --send
+            res = subprocess.run(
+                [sys.executable, self.script_path, "--send", daemon_name, "hello standalone", "--timeout", "10"],
+                capture_output=True,
+                text=True
+            )
+            self.assertEqual(res.returncode, 0)
+            data = json.loads(res.stdout)
+            self.assertTrue(data.get("success"))
+            self.assertEqual(data.get("status"), "completed")
+            self.assertIn("Pong! Received: 'hello standalone'", data.get("response", ""))
+
+        finally:
+            proc.terminate()
+            proc.wait(timeout=3)
+            if os.path.exists(socket_path):
+                try:
+                    os.remove(socket_path)
+                except OSError:
+                    pass
+
 
 if __name__ == "__main__":
     unittest.main()
