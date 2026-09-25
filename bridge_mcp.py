@@ -49,6 +49,11 @@ class ClaudeMessageBridgeMCP:
         self.active_peers: Dict[str, Dict[str, Any]] = {}
         # Stdio relay connections currently subscribed to this daemon's live notification feed
         self.notification_subscribers: list = []
+        # True when this process is a stdio relay attached to a separate persistent
+        # daemon that actually owns the session identity/socket (see run_all) - renaming
+        # must then be delegated to that daemon rather than registered under this
+        # process's own (ephemeral) PID.
+        self.attached_to_external_daemon = False
 
     def _derive_default_session_name(self) -> str:
         """
@@ -91,7 +96,11 @@ class ClaudeMessageBridgeMCP:
                 pid = meta.get("pid")
                 sock_path = meta.get("messagingSocketPath")
                 if pid and self._is_pid_alive(pid) and sock_path and os.path.exists(sock_path):
-                    logger.info(f"Background bridge daemon '{self.session_name}' is active (PID {pid}).")
+                    # An already-running daemon is authoritative on the socket path - a
+                    # caller-supplied --socket override only matters for spawning a NEW
+                    # daemon, never for finding an existing one under the same identity.
+                    self.bridge_socket_path = sock_path
+                    logger.info(f"Background bridge daemon '{self.session_name}' is active (PID {pid}) on {sock_path}.")
                     return True
             except Exception as e:
                 logger.warning(f"Error reading daemon descriptor {descriptor_path}: {e}")
@@ -636,6 +645,30 @@ class ClaudeMessageBridgeMCP:
                         logger.info("Registered notification subscriber (stdio relay attached).")
                         continue
 
+                    if frame_type == "rename":
+                        new_name = payload.get("new_name")
+                        if not new_name:
+                            ack = json.dumps({"status": "rename_failed", "error": "'new_name' is required"}) + "\n"
+                        else:
+                            old_name = self.session_name
+                            self.cleanup_session_descriptor()
+                            self.session_name = new_name
+                            self.register_session_descriptor(session_name=new_name, kind="bg")
+                            ack = json.dumps({
+                                "status": "renamed",
+                                "success": True,
+                                "previous_name": old_name,
+                                "new_name": new_name,
+                                "pid": self.registered_pid,
+                                "descriptor_file": self.session_json_path
+                            }) + "\n"
+                        try:
+                            writer.write(ack.encode("utf-8"))
+                            await writer.drain()
+                        except (ConnectionResetError, BrokenPipeError):
+                            pass
+                        continue
+
                     msg_id = payload.get("msg_id", f"inbound_{uuid.uuid4()}")
                     sender = payload.get("sender", "unknown")
 
@@ -767,6 +800,40 @@ class ClaudeMessageBridgeMCP:
                     pass
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 10.0)
+
+    async def rename_via_daemon(self, new_name: str) -> Dict[str, Any]:
+        """
+        Delegates a rename to the persistent daemon this process is attached to,
+        rather than registering a new descriptor under this process's own
+        (ephemeral, relay-only) PID - which would falsely appear dead and get
+        purged as soon as this stdio process exits.
+        """
+        try:
+            reader, writer = await asyncio.open_unix_connection(self.bridge_socket_path)
+            writer.write((json.dumps({"type": "auth", "peerToken": ""}) + "\n").encode("utf-8"))
+            writer.write((json.dumps({"type": "rename", "new_name": new_name}) + "\n").encode("utf-8"))
+            await writer.drain()
+
+            ack_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            writer.close()
+            await writer.wait_closed()
+
+            if not ack_line:
+                return {"success": False, "error": "Daemon closed the connection without acknowledging the rename."}
+            ack = json.loads(ack_line.decode("utf-8").strip())
+            if ack.get("status") != "renamed":
+                return {"success": False, "error": ack.get("error", "Daemon rejected the rename.")}
+
+            self.session_name = new_name
+            return {
+                "success": True,
+                "previous_name": ack.get("previous_name"),
+                "new_name": ack.get("new_name"),
+                "pid": ack.get("pid"),
+                "descriptor_file": ack.get("descriptor_file")
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to rename via persistent daemon: {e}"}
 
     async def mcp_stdio_loop(self):
         """
@@ -963,6 +1030,18 @@ class ClaudeMessageBridgeMCP:
                                     "isError": True
                                 }
                             })
+                        elif self.attached_to_external_daemon:
+                            res = await self.rename_via_daemon(new_name)
+                            write_response({
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {
+                                    "content": [
+                                        {"type": "text", "text": json.dumps(res, indent=2)}
+                                    ],
+                                    "isError": not res.get("success", False)
+                                }
+                            })
                         else:
                             old_name = getattr(self, "session_name", "antigravity-bridge")
                             self.cleanup_session_descriptor()
@@ -1136,6 +1215,7 @@ class ClaudeMessageBridgeMCP:
         background_tasks = []
         if daemon_active:
             logger.info(f"🚀 Persistent background daemon active for '{self.session_name}'; relaying its notifications instead of running an in-process listener.")
+            self.attached_to_external_daemon = True
             background_tasks.append(asyncio.create_task(self.relay_daemon_notifications()))
         else:
             logger.warning("Persistent daemon unavailable; registering this stdio process directly and running an in-process listener fallback (session will not survive an MCP host restart).")

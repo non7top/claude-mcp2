@@ -216,15 +216,19 @@ class TestMCPStdioProtocol(unittest.TestCase):
         socket_path = f"/tmp/test_rpc_{uuid.uuid4().hex[:8]}.sock"
 
         # Running the stdio server without --name now spawns a persistent standalone
-        # daemon by default (so a session survives an MCP host restart). Snapshot the
-        # descriptor directory beforehand so the daemon (and any descriptor files it
-        # or a rename_session call creates) can be torn down after the test instead
-        # of leaking a background process.
+        # daemon by default (so a session survives an MCP host restart), identified by
+        # a digest of cwd. Run it from an isolated temp directory - NOT this repo's own
+        # directory - so the test can never resolve to (and rename!) a real developer's
+        # live daemon for this same repo. Snapshot the descriptor directory beforehand
+        # so the daemon (and any descriptor files it or a rename_session call creates)
+        # can be torn down after the test instead of leaking a background process.
         sessions_dir = os.path.expanduser("~/.claude/sessions")
         pre_existing_descriptors = set(glob.glob(os.path.join(sessions_dir, "*.json")))
+        test_cwd = tempfile.mkdtemp(prefix="bridge_mcp_test_")
 
         proc = subprocess.Popen(
             [sys.executable, script_path, "--socket", socket_path],
+            cwd=test_cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -313,6 +317,11 @@ class TestMCPStdioProtocol(unittest.TestCase):
                     os.remove(descriptor_path)
                 except OSError:
                     pass
+
+            try:
+                os.rmdir(test_cwd)
+            except OSError:
+                pass
 
 
 class TestBridgeStandaloneCLI(unittest.TestCase):
