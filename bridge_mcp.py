@@ -445,16 +445,34 @@ class ClaudeMessageBridgeMCP:
                 line = await reader.readline()
                 if not line:
                     break
+                line_str = line.decode("utf-8").strip()
+                if not line_str:
+                    continue
+
                 try:
-                    payload = json.loads(line.decode("utf-8").strip())
+                    payload = json.loads(line_str)
+                    frame_type = payload.get("type")
+
+                    if frame_type == "auth":
+                        logger.info("Inbound peer authenticated successfully.")
+                        continue
+
                     msg_id = payload.get("msg_id", f"inbound_{uuid.uuid4()}")
+                    sender = payload.get("sender", "unknown")
+
+                    msg_obj = payload.get("message", {})
+                    if isinstance(msg_obj, dict):
+                        content_val = msg_obj.get("content", payload.get("content", ""))
+                    else:
+                        content_val = payload.get("content", str(msg_obj))
 
                     # Cache response
                     self.response_store[msg_id] = {
                         "status": payload.get("status", "received"),
-                        "sender": payload.get("sender", "unknown"),
-                        "content": payload.get("content", payload.get("message", "")),
-                        "payload": payload
+                        "sender": sender,
+                        "content": content_val,
+                        "payload": payload,
+                        "timestamp": time.time()
                     }
                     logger.info(f"Buffered inbound response frame: {msg_id}")
 

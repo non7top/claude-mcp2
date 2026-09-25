@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""
+Comprehensive Test Suite for Claude Message Bridge MCP Server (claude-mcp2)
+"""
+import os
+import sys
+import json
+import time
+import glob
+import uuid
+import asyncio
+import tempfile
+import unittest
+import subprocess
+
+# Ensure repo directory is in path
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+from bridge_mcp import ClaudeMessageBridgeMCP
+
+
+class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.socket_path = os.path.join(self.tmp_dir.name, "test_session_mgmt.sock")
+        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=self.socket_path)
+
+    async def asyncTearDown(self):
+        self.bridge.cleanup_session_descriptor()
+        self.bridge.cleanup_socket()
+        self.tmp_dir.cleanup()
+
+    async def test_session_descriptor_registration(self):
+        """Verify session descriptor and key file creation & cleanup."""
+        self.bridge.register_session_descriptor(session_name="test-bridge-suite")
+
+        # Check files exist
+        self.assertTrue(os.path.exists(self.bridge.session_json_path))
+        self.assertTrue(os.path.exists(self.bridge.session_key_path))
+
+        # Check json content
+        with open(self.bridge.session_json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            self.assertEqual(data["name"], "test-bridge-suite")
+            self.assertEqual(data["messagingSocketPath"], self.socket_path)
+
+        # Check key content
+        with open(self.bridge.session_key_path, "r", encoding="utf-8") as f:
+            key_data = json.load(f)
+            self.assertEqual(key_data["peerToken"], self.bridge.registered_token)
+
+        # Cleanup
+        self.bridge.cleanup_session_descriptor()
+        self.assertFalse(os.path.exists(self.bridge.session_json_path))
+        self.assertFalse(os.path.exists(self.bridge.session_key_path))
+
+    async def test_dead_session_purging(self):
+        """Verify purging of dead session descriptors and key files."""
+        sessions_dir = self.bridge.sessions_dir
+        os.makedirs(sessions_dir, exist_ok=True)
+
+        fake_pid = 9999999
+        fake_json = os.path.join(sessions_dir, f"{fake_pid}.json")
+        fake_key = os.path.join(sessions_dir, f"{fake_pid}.abcd1234key.key")
+
+        with open(fake_json, "w", encoding="utf-8") as f:
+            json.dump({"pid": fake_pid, "messagingSocketPath": "/tmp/fake.sock", "name": "dead-session"}, f)
+
+        with open(fake_key, "w", encoding="utf-8") as f:
+            json.dump({"peerToken": "fake_token", "procStart": str(fake_pid)}, f)
+
+        self.assertTrue(os.path.exists(fake_json))
+        self.assertTrue(os.path.exists(fake_key))
+
+        # Run verification and purging
+        await self.bridge.verify_and_purge_sessions()
+
+        self.assertFalse(os.path.exists(fake_json))
+        self.assertFalse(os.path.exists(fake_key))
+
+
+class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.socket_path = os.path.join(self.tmp_dir.name, "test_ipc.sock")
+        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=self.socket_path)
+
+    async def asyncTearDown(self):
+        self.bridge.cleanup_session_descriptor()
+        self.bridge.cleanup_socket()
+        self.tmp_dir.cleanup()
+
+    async def test_inbound_listener_and_buffering(self):
+        """Verify inbound Unix socket listener receives and buffers peer frames."""
+        server_task = asyncio.create_task(self.bridge.start_bridge_listener())
+        await asyncio.sleep(0.1)
+
+        self.assertTrue(os.path.exists(self.socket_path))
+
+        reader, writer = await asyncio.open_unix_connection(self.socket_path)
+
+        # Send auth frame
+        auth_frame = {"type": "auth", "peerToken": "test_token_123"}
+        writer.write((json.dumps(auth_frame) + "\n").encode("utf-8"))
+
+        # Send message frame
+        msg_id = "test_msg_suite_99"
+        msg_frame = {
+            "type": "user",
+            "message": {"role": "user", "content": "Suite Test Payload"},
+            "msg_id": msg_id,
+            "sender": "suite_agent"
+        }
+        writer.write((json.dumps(msg_frame) + "\n").encode("utf-8"))
+        await writer.drain()
+
+        # Read ACK
+        ack_line = await reader.readline()
+        ack_data = json.loads(ack_line.decode("utf-8"))
+        self.assertEqual(ack_data.get("status"), "received")
+        self.assertEqual(ack_data.get("msg_id"), msg_id)
+
+        writer.close()
+        await writer.wait_closed()
+
+        # Verify buffered payload in response_store
+        self.assertIn(msg_id, self.bridge.response_store)
+        cached = self.bridge.response_store[msg_id]
+        self.assertEqual(cached["sender"], "suite_agent")
+        self.assertEqual(cached["content"], "Suite Test Payload")
+
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
+
+    async def test_outbound_send_to_mock_peer(self):
+        """Verify outbound frame formatting and delivery over target Unix domain socket."""
+        mock_sock_path = os.path.join(self.tmp_dir.name, "mock_target.sock")
+        received_frames = []
+
+        async def mock_handler(reader, writer):
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                received_frames.append(json.loads(line.decode("utf-8").strip()))
+            writer.close()
+            await writer.wait_closed()
+
+        mock_server = await asyncio.start_unix_server(mock_handler, mock_sock_path)
+
+        self.bridge.active_peers = {
+            "mock-peer": {
+                "name": "mock-peer",
+                "pid": 88888,
+                "sessionId": "mock-session-xyz",
+                "socket": mock_sock_path,
+                "token": "secret_peer_token",
+                "cwd": "/tmp"
+            }
+        }
+
+        async def bypass_verify():
+            return self.bridge.active_peers
+        self.bridge.verify_and_purge_sessions = bypass_verify
+
+        res = await self.bridge.send_to_claude("mock-peer", "Hello Mock Peer!", wait_for_response=False)
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(res["success"])
+        self.assertEqual(len(received_frames), 2)
+        self.assertEqual(received_frames[0]["type"], "auth")
+        self.assertEqual(received_frames[0]["peerToken"], "secret_peer_token")
+        self.assertEqual(received_frames[1]["type"], "user")
+        self.assertEqual(received_frames[1]["message"]["content"], "Hello Mock Peer!")
+
+        mock_server.close()
+        await mock_server.wait_closed()
+
+
+class TestTranscriptResponseParser(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
+
+    async def asyncTearDown(self):
+        self.tmp_dir.cleanup()
+
+    async def test_transcript_parsing(self):
+        """Verify assistant text extraction from mock .jsonl transcript."""
+        session_id = "test-session-parse-123"
+        project_dir = os.path.join(self.tmp_dir.name, "mock-project")
+        os.makedirs(project_dir, exist_ok=True)
+        transcript_file = os.path.join(project_dir, f"{session_id}.jsonl")
+
+        # Mock _find_transcript_file to return our mock file
+        self.bridge._find_transcript_file = lambda sid: transcript_file
+
+        with open(transcript_file, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "message": {"content": "Initial user prompt"}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Response Part 1"}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Response Part 2"}]}}) + "\n")
+            f.write(json.dumps({"type": "system", "subtype": "turn_duration", "durationMs": 1500}) + "\n")
+
+        res = await self.bridge.wait_for_assistant_response(session_id, start_offset=0, timeout=2.0)
+        self.assertTrue(res["completed"])
+        self.assertEqual(res["content"], "Response Part 1\n\nResponse Part 2")
+
+
+class TestMCPStdioProtocol(unittest.TestCase):
+    def test_stdio_rpc(self):
+        """Verify standard JSON-RPC 2.0 stdio MCP methods."""
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "bridge_mcp.py"))
+        socket_path = f"/tmp/test_rpc_{uuid.uuid4().hex[:8]}.sock"
+
+        proc = subprocess.Popen(
+            [sys.executable, script_path, "--socket", socket_path],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        try:
+            # 1. initialize
+            init_req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+            proc.stdin.write(json.dumps(init_req) + "\n")
+            proc.stdin.flush()
+            init_resp = json.loads(proc.stdout.readline())
+            self.assertEqual(init_resp["result"]["serverInfo"]["name"], "claudemessaging")
+
+            # 2. ping
+            ping_req = {"jsonrpc": "2.0", "id": 2, "method": "ping", "params": {}}
+            proc.stdin.write(json.dumps(ping_req) + "\n")
+            proc.stdin.flush()
+            ping_resp = json.loads(proc.stdout.readline())
+            self.assertEqual(ping_resp["result"], {})
+
+            # 3. tools/list
+            list_req = {"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}}
+            proc.stdin.write(json.dumps(list_req) + "\n")
+            proc.stdin.flush()
+            list_resp = json.loads(proc.stdout.readline())
+            tool_names = [t["name"] for t in list_resp["result"]["tools"]]
+            self.assertIn("list_sessions", tool_names)
+            self.assertIn("send_message", tool_names)
+            self.assertIn("get_responses", tool_names)
+            self.assertIn("purge_sessions", tool_names)
+
+            # 4. tools/call list_sessions
+            call_req = {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "list_sessions", "arguments": {}}
+            }
+            proc.stdin.write(json.dumps(call_req) + "\n")
+            proc.stdin.flush()
+            call_resp = json.loads(proc.stdout.readline())
+            self.assertFalse(call_resp["result"]["isError"])
+            self.assertIn("content", call_resp["result"])
+
+        finally:
+            proc.terminate()
+            proc.wait(timeout=2)
+            if os.path.exists(socket_path):
+                try:
+                    os.remove(socket_path)
+                except OSError:
+                    pass
+
+
+if __name__ == "__main__":
+    unittest.main()
