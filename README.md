@@ -39,23 +39,42 @@ A Model Context Protocol (MCP) execution bridge built for **Google Antigravity**
 
 ## 📦 Installation & Setup
 
-### Option 1: Via `uvx` (Recommended - Zero Installation)
+### Option 1: Via `uvx` or `uv tool run` (Zero-Installation / Ephemeral)
 
 Register directly with **Antigravity CLI (`agy`)** from GitHub without cloning:
 
+**Using `uvx`:**
 ```bash
 agy mcp add claudemessaging uvx --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
 ```
 
-Or run directly via `uvx`:
+**Using `uv tool run`:**
+```bash
+agy mcp add claudemessaging uv tool run --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
+```
 
+Or run directly in terminal:
 ```bash
 uvx --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
 ```
 
 ---
 
-### Option 2: Local Repository Installation
+### Option 2: Permanent Tool Installation (`uv tool install`)
+
+Install the `bridge-mcp` binary permanently into your system path using `uv`:
+
+```bash
+# 1. Install tool permanently into ~/.local/bin (or uv tool path)
+uv tool install git+https://github.com/non7top/claude-mcp2.git
+
+# 2. Register with Antigravity CLI
+agy mcp add claudemessaging bridge-mcp
+```
+
+---
+
+### Option 3: Local Repository Installation
 
 1. **Clone the repository**:
    ```bash
@@ -63,7 +82,7 @@ uvx --from git+https://github.com/non7top/claude-mcp2.git bridge-mcp
    cd claude-mcp2
    ```
 
-2. **Register with Antigravity CLI (`agy`) using `uvx`**:
+2. **Register with Antigravity CLI (`agy`) using `uv` / `uvx`**:
    ```bash
    agy mcp add claudemessaging uvx --from . bridge-mcp
    ```
