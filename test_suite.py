@@ -368,13 +368,15 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                 except OSError:
                     pass
 
-    def test_cli_standalone_ping_pong(self):
-        """Verify python3 bridge_mcp.py --send receives auto-reply turn from standalone daemon."""
+    def test_cli_standalone_send_no_wait(self):
+        """Verify python3 bridge_mcp.py --send dispatches to a standalone daemon without
+        any canned auto-reply (the auto-reply/"Pong!" scaffold has been removed - a real
+        reply, if any, is expected to arrive via a genuine send_message call instead)."""
         socket_path = f"/tmp/test_pingpong_{uuid.uuid4().hex[:8]}.sock"
         daemon_name = f"suite-daemon-{uuid.uuid4().hex[:6]}"
 
         proc = subprocess.Popen(
-            [sys.executable, self.script_path, "--standalone", "--socket", socket_path, "--name", daemon_name, "--auto-reply"],
+            [sys.executable, self.script_path, "--standalone", "--socket", socket_path, "--name", daemon_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True
@@ -384,17 +386,18 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
             time.sleep(1.0)
             self.assertTrue(os.path.exists(socket_path))
 
-            # Send message to the daemon using --send
+            # Send message to the daemon using --send --no-wait; dispatch should succeed
+            # immediately since it doesn't depend on any fabricated response turn.
             res = subprocess.run(
-                [sys.executable, self.script_path, "--send", daemon_name, "hello standalone", "--timeout", "10"],
+                [sys.executable, self.script_path, "--send", daemon_name, "hello standalone", "--no-wait"],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=10
             )
             self.assertEqual(res.returncode, 0)
             data = json.loads(res.stdout)
             self.assertTrue(data.get("success"))
-            self.assertEqual(data.get("status"), "completed")
-            self.assertIn("Pong! Received: 'hello standalone'", data.get("response", ""))
+            self.assertEqual(data.get("status"), "dispatched")
 
         finally:
             proc.terminate()

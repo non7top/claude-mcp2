@@ -27,13 +27,11 @@ class ClaudeMessageBridgeMCP:
     def __init__(
         self,
         bridge_socket_path: Optional[str] = None,
-        session_name: Optional[str] = None,
-        auto_reply: bool = True
+        session_name: Optional[str] = None
     ):
         self.pid = os.getpid()
         self.home_dir = os.path.expanduser("~")
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
-        self.auto_reply = auto_reply
 
         env_name = os.environ.get("AGY_SESSION_NAME")
         self.session_name = session_name or env_name or self._derive_default_session_name()
@@ -499,44 +497,6 @@ class ClaudeMessageBridgeMCP:
                 "error": f"Failed to send message over Unix socket to {socket_path}: {e}"
             }
 
-    def record_inbound_turn(self, sender: str, content: str, reply_text: Optional[str] = None):
-        """
-        Records inbound message turn into the bridge transcript file
-        so querying processes can read turns and responses seamlessly.
-        """
-        if not getattr(self, "bridge_transcript_path", None):
-            return
-
-        try:
-            with open(self.bridge_transcript_path, "a", encoding="utf-8") as f:
-                user_turn = {
-                    "type": "user",
-                    "message": {"role": "user", "content": content},
-                    "sender": sender,
-                    "timestamp": time.time()
-                }
-                f.write(json.dumps(user_turn) + "\n")
-
-                if reply_text:
-                    assistant_turn = {
-                        "type": "assistant",
-                        "message": {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": reply_text}]
-                        },
-                        "timestamp": time.time()
-                    }
-                    duration_turn = {
-                        "type": "system",
-                        "subtype": "turn_duration",
-                        "durationMs": 100,
-                        "timestamp": time.time()
-                    }
-                    f.write(json.dumps(assistant_turn) + "\n")
-                    f.write(json.dumps(duration_turn) + "\n")
-        except Exception as e:
-            logger.error(f"Failed to append to bridge transcript file: {e}")
-
     def register_session_descriptor(self, session_name: str = "antigravity-bridge", kind: str = "bg"):
         """
         Registers a session descriptor in ~/.claude/sessions/ so that surrounding
@@ -558,11 +518,6 @@ class ClaudeMessageBridgeMCP:
         self.session_json_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.json")
         self.session_key_path = os.path.join(self.sessions_dir, f"{self.registered_pid}.{self.registered_token[:16]}.key")
         self.named_descriptor_path = os.path.join(self.sessions_dir, f"bridge-{sanitized_name}.json")
-
-        # Create a dedicated bridge transcript directory and file
-        self.bridge_transcript_dir = os.path.expanduser(f"~/.claude/projects/-bridge-session-{sanitized_name}")
-        os.makedirs(self.bridge_transcript_dir, exist_ok=True)
-        self.bridge_transcript_path = os.path.join(self.bridge_transcript_dir, f"{self.registered_session_id}.jsonl")
 
         session_data = {
             "pid": self.registered_pid,
@@ -605,7 +560,7 @@ class ClaudeMessageBridgeMCP:
         """
         Cleans up the bridge's registered session descriptor, key files, and transcript files on shutdown.
         """
-        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None), getattr(self, "bridge_transcript_path", None), getattr(self, "named_descriptor_path", None)]:
+        for p in [getattr(self, "session_json_path", None), getattr(self, "session_key_path", None), getattr(self, "named_descriptor_path", None)]:
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
@@ -654,56 +609,6 @@ class ClaudeMessageBridgeMCP:
         for sub_writer in dead_subscribers:
             self.notification_subscribers.remove(sub_writer)
 
-    async def poke_back_sender(self, sender: str, reply_content: str):
-        """
-        Dispatches an outbound IPC response frame back to the sender's Unix domain socket.
-        """
-        if not sender or sender.lower() in ["unknown", "none", self.session_name.lower()]:
-            return
-
-        await self.verify_and_purge_sessions()
-        peer = self._resolve_session(sender)
-        if not peer:
-            logger.info(f"Sender '{sender}' is not found among active peers. Skipping socket poke back.")
-            return
-
-        if peer.get("kind") != "bg":
-            logger.info(f"Sender '{sender}' is of kind '{peer.get('kind')}' (not 'bg'). Skipping socket poke back to protect interactive sessions.")
-            return
-
-        socket_path = peer.get("socket")
-        token = peer.get("token", "")
-        if not socket_path or not os.path.exists(socket_path):
-            logger.warning(f"Sender socket '{socket_path}' for '{sender}' is not reachable.")
-            return
-
-        auth_frame = {"type": "auth", "peerToken": token}
-        msg_id = f"msg_reply_{uuid.uuid4()}"
-        message_frame = {
-            "type": "user",
-            "message": {"role": "user", "content": reply_content},
-            "priority": "next",
-            "msg_id": msg_id,
-            "sender": self.session_name
-        }
-
-        try:
-            reader, writer = await asyncio.open_unix_connection(socket_path)
-            writer.write((json.dumps(auth_frame) + "\n").encode("utf-8"))
-            writer.write((json.dumps(message_frame) + "\n").encode("utf-8"))
-            await writer.drain()
-
-            try:
-                await asyncio.wait_for(reader.readline(), timeout=2.0)
-            except Exception:
-                pass
-
-            writer.close()
-            await writer.wait_closed()
-            logger.info(f"🚀 Poked back sender '{sender}' over UNIX socket {socket_path} with reply frame.")
-        except Exception as e:
-            logger.error(f"Failed to poke back sender '{sender}': {e}")
-
     async def handle_inbound_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
         Manages inbound response tracking. Listens for external peer confirmations
@@ -750,10 +655,6 @@ class ClaudeMessageBridgeMCP:
                     }
                     logger.info(f"Buffered inbound response frame: {msg_id}")
 
-                    # Generate auto-reply turn if enabled
-                    reply_text = f"Pong! Received: '{content_val}'" if self.auto_reply else None
-                    self.record_inbound_turn(sender=sender, content=content_val, reply_text=reply_text)
-
                     # Notify agy host continuously in background over stdout (when this
                     # process is itself the attached stdio host) and/or via any subscribed
                     # stdio relay (when a persistent standalone daemon is handling the socket).
@@ -767,10 +668,6 @@ class ClaudeMessageBridgeMCP:
                     self.broadcast_notification(method="notifications/message", params=message_notification_params)
                     self.notify_mcp_host(method="notifications/tools/list_changed", params={})
                     self.broadcast_notification(method="notifications/tools/list_changed", params={})
-
-                    # Poke back sender session on its Unix domain socket
-                    if reply_text and sender and sender.lower() not in ["unknown", "none", self.session_name.lower()]:
-                        asyncio.create_task(self.poke_back_sender(sender=sender, reply_content=reply_text))
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
                     try:
@@ -1284,18 +1181,12 @@ def main():
     send_group = parser.add_argument_group("Send & Server Options")
     send_group.add_argument("--no-wait", action="store_true", help="Do not wait for assistant response turn when sending message")
     send_group.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds for response turn completion (default: 60)")
-    send_group.add_argument("--auto-reply", action="store_true", default=None, help="Enable automatic pong response turns for inbound messages (default: true for standalone mode)")
-    send_group.add_argument("--no-auto-reply", action="store_false", dest="auto_reply", help="Disable automatic pong response turns")
 
     args = parser.parse_args()
 
-    # Default auto_reply to True for all bridge instances, unless explicitly disabled
-    auto_reply_setting = True if args.auto_reply is None else args.auto_reply
-
     bridge = ClaudeMessageBridgeMCP(
         bridge_socket_path=args.socket,
-        session_name=args.name,
-        auto_reply=auto_reply_setting
+        session_name=args.name
     )
 
     if args.list:
