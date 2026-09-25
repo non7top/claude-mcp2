@@ -548,6 +548,9 @@ class ClaudeMessageBridgeMCP:
         """
         Emits an asynchronous MCP JSON-RPC notification line over stdout to notify the host (agy).
         """
+        if sys.stdout.isatty():
+            return
+
         notification = {
             "jsonrpc": "2.0",
             "method": method,
@@ -557,6 +560,8 @@ class ClaudeMessageBridgeMCP:
             sys.stdout.write(json.dumps(notification) + "\n")
             sys.stdout.flush()
             logger.info(f"Poked MCP host with notification '{method}': {params.get('msg_id')}")
+        except (BrokenPipeError, OSError):
+            logger.info("MCP host stdout pipe closed.")
         except Exception as e:
             logger.error(f"Failed to write MCP notification to stdout: {e}")
 
@@ -625,6 +630,8 @@ class ClaudeMessageBridgeMCP:
 
                 except json.JSONDecodeError:
                     logger.error("Received invalid JSON payload over inbound bridge socket")
+                except Exception as ex:
+                    logger.error(f"Error processing inbound frame payload: {ex}")
         except (ConnectionResetError, BrokenPipeError, asyncio.IncompleteReadError):
             logger.info("Inbound peer connection closed.")
         except Exception as e:
@@ -647,15 +654,20 @@ class ClaudeMessageBridgeMCP:
             except OSError as e:
                 logger.error(f"Failed to remove stale bridge socket {self.bridge_socket_path}: {e}")
 
-        server = await asyncio.start_unix_server(
-            self.handle_inbound_client, self.bridge_socket_path
-        )
-        # Apply secure single-user runtime read/write bounds
-        os.chmod(self.bridge_socket_path, stat.S_IRUSR | stat.S_IWUSR)
-        logger.info(f"🚀 Bridge server operational on: {self.bridge_socket_path}")
+        try:
+            server = await asyncio.start_unix_server(
+                self.handle_inbound_client, self.bridge_socket_path
+            )
+            # Apply secure single-user runtime read/write bounds
+            os.chmod(self.bridge_socket_path, stat.S_IRUSR | stat.S_IWUSR)
+            logger.info(f"🚀 Bridge server operational on: {self.bridge_socket_path}")
 
-        async with server:
-            await server.serve_forever()
+            async with server:
+                await server.serve_forever()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Bridge listener server error: {e}")
 
     async def mcp_stdio_loop(self):
         """
