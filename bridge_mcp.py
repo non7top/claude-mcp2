@@ -22,17 +22,39 @@ logging.basicConfig(
 logger = logging.getLogger("SocketBridgeMCP")
 
 class ClaudeMessageBridgeMCP:
-    def __init__(self, bridge_socket_path: Optional[str] = None):
+    def __init__(self, bridge_socket_path: Optional[str] = None, session_name: Optional[str] = None):
+        self.pid = os.getpid()
         self.home_dir = os.path.expanduser("~")
         self.sessions_dir = os.path.join(self.home_dir, ".claude", "sessions")
 
         env_socket = os.environ.get("AGY_MCP_BRIDGE_SOCKET")
-        default_socket = env_socket or "/tmp/agy_mcp_bridge.sock"
-        self.bridge_socket_path = bridge_socket_path or default_socket
+        if bridge_socket_path:
+            self.bridge_socket_path = bridge_socket_path
+        elif env_socket:
+            self.bridge_socket_path = env_socket
+        else:
+            self.bridge_socket_path = self._get_default_socket_path(self.pid)
+
+        env_name = os.environ.get("AGY_SESSION_NAME")
+        self.session_name = session_name or env_name or "antigravity-bridge"
 
         # Historical datastore for storing response payloads
         self.response_store: Dict[str, Dict[str, Any]] = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
+
+    def _get_default_socket_path(self, pid: int) -> str:
+        try:
+            uid = os.getuid()
+            cc_socks_dir = f"/run/user/{uid}/cc-socks"
+            if os.path.exists(cc_socks_dir) and os.access(cc_socks_dir, os.W_OK):
+                return os.path.join(cc_socks_dir, f"{pid}.sock")
+
+            fallback_dir = "/tmp/cc-socks"
+            os.makedirs(fallback_dir, exist_ok=True)
+            return os.path.join(fallback_dir, f"{pid}.sock")
+        except Exception:
+            pass
+        return f"/tmp/agy_mcp_bridge_{pid}.sock"
 
     def _is_pid_alive(self, pid: Optional[int]) -> bool:
         if not pid or not isinstance(pid, int):
@@ -762,7 +784,7 @@ class ClaudeMessageBridgeMCP:
 
     async def run_all(self):
         # Register session descriptor so Claude Code instances discover us via ListAgents
-        self.register_session_descriptor(session_name="antigravity-bridge")
+        self.register_session_descriptor(session_name=self.session_name)
 
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -800,9 +822,10 @@ class ClaudeMessageBridgeMCP:
 def main():
     parser = argparse.ArgumentParser(description="Claude Message Bridge MCP Server")
     parser.add_argument("--socket", type=str, default=None, help="Path to bridge Unix socket")
+    parser.add_argument("--name", type=str, default="antigravity-bridge", help="Session name announced to Claude Code")
     args = parser.parse_args()
 
-    bridge = ClaudeMessageBridgeMCP(bridge_socket_path=args.socket)
+    bridge = ClaudeMessageBridgeMCP(bridge_socket_path=args.socket, session_name=args.name)
     try:
         asyncio.run(bridge.run_all())
     except (KeyboardInterrupt, SystemExit):
