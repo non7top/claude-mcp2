@@ -12,7 +12,6 @@ import logging
 import psutil
 import signal
 import argparse
-import subprocess
 from typing import Dict, Any, Optional
 
 # MCP protocols communicate over stdout, logs MUST route to stderr
@@ -47,13 +46,6 @@ class ClaudeMessageBridgeMCP:
         # Historical datastore for storing response payloads
         self.response_store: Dict[str, Dict[str, Any]] = {}
         self.active_peers: Dict[str, Dict[str, Any]] = {}
-        # Stdio relay connections currently subscribed to this daemon's live notification feed
-        self.notification_subscribers: list = []
-        # True when this process is a stdio relay attached to a separate persistent
-        # daemon that actually owns the session identity/socket (see run_all) - renaming
-        # must then be delegated to that daemon rather than registered under this
-        # process's own (ephemeral) PID.
-        self.attached_to_external_daemon = False
 
     def _derive_default_session_name(self) -> str:
         """
@@ -79,65 +71,6 @@ class ClaudeMessageBridgeMCP:
         except Exception:
             pass
         return f"/tmp/bridge_{sname}.sock"
-
-    async def ensure_daemon_running(self) -> bool:
-        """
-        Ensures a persistent background daemon for this session name is running.
-        If not running, spawns a detached background process that will keep
-        serving the socket (and this session's identity) across MCP host restarts.
-        """
-        sanitized_name = self.session_name.replace("/", "-")
-        descriptor_path = os.path.join(self.sessions_dir, f"bridge-{sanitized_name}.json")
-
-        if os.path.exists(descriptor_path):
-            try:
-                with open(descriptor_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                pid = meta.get("pid")
-                sock_path = meta.get("messagingSocketPath")
-                if pid and self._is_pid_alive(pid) and sock_path and os.path.exists(sock_path):
-                    # An already-running daemon is authoritative on the socket path - a
-                    # caller-supplied --socket override only matters for spawning a NEW
-                    # daemon, never for finding an existing one under the same identity.
-                    self.bridge_socket_path = sock_path
-                    logger.info(f"Background bridge daemon '{self.session_name}' is active (PID {pid}) on {sock_path}.")
-                    return True
-            except Exception as e:
-                logger.warning(f"Error reading daemon descriptor {descriptor_path}: {e}")
-
-        # Daemon is not running; spawn detached background process.
-        # Use an absolute, directly-executable path rather than relying on PATH lookup,
-        # since a uvx-managed console script's directory is typically not on PATH.
-        if os.path.isabs(sys.argv[0]) and os.access(sys.argv[0], os.X_OK):
-            cmd = [sys.argv[0], "--standalone", "--name", self.session_name, "--socket", self.bridge_socket_path]
-        else:
-            cmd = [sys.executable, os.path.abspath(__file__), "--standalone", "--name", self.session_name, "--socket", self.bridge_socket_path]
-
-        logger.info(f"🚀 Spawning persistent background bridge daemon: {' '.join(cmd)}")
-        try:
-            daemon_proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            # This process is meant to fully outlive us - don't await it here - but
-            # something must eventually reap it via waitpid() or it sits as a zombie
-            # (which still passes psutil.pid_exists()/kill(pid, 0) checks) once it
-            # actually exits, for as long as this stdio process stays alive.
-            asyncio.create_task(daemon_proc.wait())
-            start_wait = time.time()
-            while time.time() - start_wait < 3.0:
-                if os.path.exists(descriptor_path):
-                    await asyncio.sleep(0.2)
-                    return True
-                await asyncio.sleep(0.1)
-        except Exception as spawn_err:
-            logger.error(f"Failed to spawn background daemon: {spawn_err}")
-            return False
-
-        return os.path.exists(descriptor_path)
 
     def _is_pid_alive(self, pid: Optional[int]) -> bool:
         if not pid or not isinstance(pid, int):
@@ -604,26 +537,6 @@ class ClaudeMessageBridgeMCP:
         except Exception as e:
             logger.error(f"Failed to write MCP notification to stdout: {e}")
 
-    def broadcast_notification(self, method: str, params: Dict[str, Any]):
-        """
-        Forwards a notification to every stdio relay currently subscribed to this
-        daemon's live feed (see relay_daemon_notifications), so whichever MCP host
-        process is presently attached hears about inbound activity even though it
-        did not itself run the socket listener that received it.
-        """
-        if not self.notification_subscribers:
-            return
-
-        frame = (json.dumps({"type": "notify", "method": method, "params": params}) + "\n").encode("utf-8")
-        dead_subscribers = []
-        for sub_writer in self.notification_subscribers:
-            try:
-                sub_writer.write(frame)
-            except Exception:
-                dead_subscribers.append(sub_writer)
-        for sub_writer in dead_subscribers:
-            self.notification_subscribers.remove(sub_writer)
-
     async def handle_inbound_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """
         Manages inbound response tracking. Listens for external peer confirmations
@@ -646,35 +559,6 @@ class ClaudeMessageBridgeMCP:
                         logger.info("Inbound peer authenticated successfully.")
                         continue
 
-                    if frame_type == "subscribe":
-                        self.notification_subscribers.append(writer)
-                        logger.info("Registered notification subscriber (stdio relay attached).")
-                        continue
-
-                    if frame_type == "rename":
-                        new_name = payload.get("new_name")
-                        if not new_name:
-                            ack = json.dumps({"status": "rename_failed", "error": "'new_name' is required"}) + "\n"
-                        else:
-                            old_name = self.session_name
-                            self.cleanup_session_descriptor()
-                            self.session_name = new_name
-                            self.register_session_descriptor(session_name=new_name, kind="bg")
-                            ack = json.dumps({
-                                "status": "renamed",
-                                "success": True,
-                                "previous_name": old_name,
-                                "new_name": new_name,
-                                "pid": self.registered_pid,
-                                "descriptor_file": self.session_json_path
-                            }) + "\n"
-                        try:
-                            writer.write(ack.encode("utf-8"))
-                            await writer.drain()
-                        except (ConnectionResetError, BrokenPipeError):
-                            pass
-                        continue
-
                     msg_id = payload.get("msg_id", f"inbound_{uuid.uuid4()}")
                     sender = payload.get("sender", "unknown")
 
@@ -694,19 +578,17 @@ class ClaudeMessageBridgeMCP:
                     }
                     logger.info(f"Buffered inbound response frame: {msg_id}")
 
-                    # Notify agy host continuously in background over stdout (when this
-                    # process is itself the attached stdio host) and/or via any subscribed
-                    # stdio relay (when a persistent standalone daemon is handling the socket).
-                    message_notification_params = {
-                        "msg_id": msg_id,
-                        "sender": sender,
-                        "content": content_val,
-                        "timestamp": time.time()
-                    }
-                    self.notify_mcp_host(method="notifications/message", params=message_notification_params)
-                    self.broadcast_notification(method="notifications/message", params=message_notification_params)
+                    # Notify agy host continuously in background over stdout
+                    self.notify_mcp_host(
+                        method="notifications/message",
+                        params={
+                            "msg_id": msg_id,
+                            "sender": sender,
+                            "content": content_val,
+                            "timestamp": time.time()
+                        }
+                    )
                     self.notify_mcp_host(method="notifications/tools/list_changed", params={})
-                    self.broadcast_notification(method="notifications/tools/list_changed", params={})
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
                     try:
@@ -724,8 +606,6 @@ class ClaudeMessageBridgeMCP:
         except Exception as e:
             logger.error(f"Error handling inbound traffic: {e}")
         finally:
-            if writer in self.notification_subscribers:
-                self.notification_subscribers.remove(writer)
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -757,96 +637,6 @@ class ClaudeMessageBridgeMCP:
             pass
         except Exception as e:
             logger.error(f"Bridge listener server error: {e}")
-
-    async def relay_daemon_notifications(self):
-        """
-        Connects to an already-running persistent standalone daemon as a subscriber
-        and relays its live notification feed to this process's own stdout, so the
-        currently-attached MCP host (agy) keeps hearing about inbound activity even
-        though the daemon itself - not this stdio process - owns the socket and
-        survives across MCP host restarts. Reconnects with backoff if the daemon
-        connection drops (e.g. the daemon restarted).
-        """
-        backoff = 1.0
-        while True:
-            writer = None
-            try:
-                reader, writer = await asyncio.open_unix_connection(self.bridge_socket_path)
-                writer.write((json.dumps({"type": "auth", "peerToken": ""}) + "\n").encode("utf-8"))
-                writer.write((json.dumps({"type": "subscribe"}) + "\n").encode("utf-8"))
-                await writer.drain()
-                logger.info(f"🚀 Subscribed to persistent daemon notification feed on {self.bridge_socket_path}.")
-                backoff = 1.0
-
-                while True:
-                    line = await reader.readline()
-                    if not line:
-                        break
-                    try:
-                        frame = json.loads(line.decode("utf-8").strip())
-                    except json.JSONDecodeError:
-                        continue
-                    if frame.get("type") == "notify":
-                        self.notify_mcp_host(
-                            method=frame.get("method", "notifications/message"),
-                            params=frame.get("params", {})
-                        )
-            except asyncio.CancelledError:
-                if writer:
-                    writer.close()
-                raise
-            except Exception as e:
-                logger.warning(f"Lost connection to persistent daemon, retrying in {backoff:.0f}s: {e}")
-                # The daemon may have actually died rather than just hiccuped - try to
-                # respawn/reattach so this relay self-heals instead of retrying forever
-                # against a socket nobody will ever answer on again.
-                try:
-                    await self.ensure_daemon_running()
-                except Exception:
-                    pass
-
-            if writer:
-                try:
-                    writer.close()
-                    await writer.wait_closed()
-                except Exception:
-                    pass
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 10.0)
-
-    async def rename_via_daemon(self, new_name: str) -> Dict[str, Any]:
-        """
-        Delegates a rename to the persistent daemon this process is attached to,
-        rather than registering a new descriptor under this process's own
-        (ephemeral, relay-only) PID - which would falsely appear dead and get
-        purged as soon as this stdio process exits.
-        """
-        try:
-            reader, writer = await asyncio.open_unix_connection(self.bridge_socket_path)
-            writer.write((json.dumps({"type": "auth", "peerToken": ""}) + "\n").encode("utf-8"))
-            writer.write((json.dumps({"type": "rename", "new_name": new_name}) + "\n").encode("utf-8"))
-            await writer.drain()
-
-            ack_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
-            writer.close()
-            await writer.wait_closed()
-
-            if not ack_line:
-                return {"success": False, "error": "Daemon closed the connection without acknowledging the rename."}
-            ack = json.loads(ack_line.decode("utf-8").strip())
-            if ack.get("status") != "renamed":
-                return {"success": False, "error": ack.get("error", "Daemon rejected the rename.")}
-
-            self.session_name = new_name
-            return {
-                "success": True,
-                "previous_name": ack.get("previous_name"),
-                "new_name": ack.get("new_name"),
-                "pid": ack.get("pid"),
-                "descriptor_file": ack.get("descriptor_file")
-            }
-        except Exception as e:
-            return {"success": False, "error": f"Failed to rename via persistent daemon: {e}"}
 
     async def mcp_stdio_loop(self):
         """
@@ -1043,18 +833,6 @@ class ClaudeMessageBridgeMCP:
                                     "isError": True
                                 }
                             })
-                        elif self.attached_to_external_daemon:
-                            res = await self.rename_via_daemon(new_name)
-                            write_response({
-                                "jsonrpc": "2.0",
-                                "id": req_id,
-                                "result": {
-                                    "content": [
-                                        {"type": "text", "text": json.dumps(res, indent=2)}
-                                    ],
-                                    "isError": not res.get("success", False)
-                                }
-                            })
                         else:
                             old_name = getattr(self, "session_name", "antigravity-bridge")
                             self.cleanup_session_descriptor()
@@ -1166,6 +944,9 @@ class ClaudeMessageBridgeMCP:
         """
         Runs the bridge as a standalone daemon server without the stdio MCP loop.
         Registers session descriptor and listens on Unix domain socket for inbound messages.
+        This is an explicit, user-invoked long-lived process (tied to whatever TTY,
+        process manager, or supervisor the user chooses to run it under) - nothing
+        auto-spawns it.
         """
         self.register_session_descriptor(session_name=self.session_name, kind="bg")
 
@@ -1203,14 +984,13 @@ class ClaudeMessageBridgeMCP:
 
     async def run_all(self):
         """
-        Stdio MCP server loop. Prefers attaching to a persistent standalone background
-        daemon (spawning one if none exists) and relaying its notifications over this
-        process's stdout, so the session's socket identity and message history survive
-        MCP host restarts instead of dying with this stdio process. Falls back to
-        running the socket listener in-process only if a persistent daemon could not
-        be started.
+        Stdio MCP server loop. Registers this process's own session descriptor and
+        runs the Unix socket listener in-process, tied 1:1 to this stdio connection's
+        lifetime - its identity (session name, socket path) is derived from cwd, so
+        when the MCP host (Antigravity) restarts this connection, the fresh process
+        just re-registers under the same name immediately.
         """
-        daemon_active = await self.ensure_daemon_running()
+        self.register_session_descriptor(session_name=self.session_name, kind="bg")
 
         loop = asyncio.get_running_loop()
         stop_event = asyncio.Event()
@@ -1225,28 +1005,20 @@ class ClaudeMessageBridgeMCP:
             except (NotImplementedError, RuntimeError):
                 pass
 
-        background_tasks = []
-        if daemon_active:
-            logger.info(f"🚀 Persistent background daemon active for '{self.session_name}'; relaying its notifications instead of running an in-process listener.")
-            self.attached_to_external_daemon = True
-            background_tasks.append(asyncio.create_task(self.relay_daemon_notifications()))
-        else:
-            logger.warning("Persistent daemon unavailable; registering this stdio process directly and running an in-process listener fallback (session will not survive an MCP host restart).")
-            self.register_session_descriptor(session_name=self.session_name, kind="bg")
-            background_tasks.append(asyncio.create_task(self.start_bridge_listener()))
-
+        listener_task = asyncio.create_task(self.start_bridge_listener())
         stdio_task = asyncio.create_task(self.mcp_stdio_loop())
         stop_task = asyncio.create_task(stop_event.wait())
 
         # Only the stdio channel itself (or an explicit stop signal) should end this
-        # process - a background listener/relay hiccup must not tear down a perfectly
-        # healthy connection to the MCP host.
+        # process - a listener hiccup must not tear down an otherwise-healthy
+        # connection to the MCP host.
         done, pending = await asyncio.wait(
             [stdio_task, stop_task],
             return_when=asyncio.FIRST_COMPLETED
         )
 
-        remaining_tasks = list(pending) + background_tasks
+        remaining_tasks = set(pending)
+        remaining_tasks.add(listener_task)
         for task in remaining_tasks:
             task.cancel()
         for task in remaining_tasks:
@@ -1255,9 +1027,8 @@ class ClaudeMessageBridgeMCP:
             except (asyncio.CancelledError, Exception):
                 pass
 
-        if not daemon_active:
-            self.cleanup_session_descriptor()
-            self.cleanup_socket()
+        self.cleanup_session_descriptor()
+        self.cleanup_socket()
         logger.info("Bridge stdio handler shut down gracefully.")
 
 def main():
