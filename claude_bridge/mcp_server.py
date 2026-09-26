@@ -25,14 +25,12 @@ TOOLS = [
     },
     {
         "name": "send_message",
-        "description": "Sends an authenticated user message to a target Claude Code session and waits for its response.",
+        "description": "Dispatches an authenticated user message to a target Claude Code session. Fire-and-forget: any real reply the target sends back arrives later as its own inbound activity, observable via get_responses - this does not wait for or return a reply.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "session": {"type": "string", "description": "Target session name, PID, or Session ID"},
-                "message": {"type": "string", "description": "Text message content to deliver"},
-                "wait": {"type": "boolean", "description": "Whether to wait for Claude to finish generating its response (default true)"},
-                "timeout": {"type": "number", "description": "Maximum seconds to wait for response turn completion (default 60)"}
+                "message": {"type": "string", "description": "Text message content to deliver"}
             },
             "required": ["session", "message"]
         }
@@ -112,9 +110,7 @@ async def _tool_call(protocol: ClaudeMessagingProtocol, tool_name: str, args: Di
             return {"content": [{"type": "text", "text": "Error: Both 'session' and 'message' arguments are required."}], "isError": True}
         result = await protocol.send_to_claude(
             session_identifier=target_session,
-            message_content=message_text,
-            wait_for_response=args.get("wait", True),
-            timeout=float(args.get("timeout", 60.0))
+            message_content=message_text
         )
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}], "isError": not result.get("success", False)}
 
