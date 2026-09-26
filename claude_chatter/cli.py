@@ -10,7 +10,8 @@ import argparse
 
 from .protocol import ClaudeMessagingProtocol
 from .standalone import run_standalone
-from .mcp_server import run_mcp_server, make_protocol
+# mcp_server pulls in fastmcp, which only the default (MCP stdio) mode needs -
+# import it lazily so --list/--send/--purge/--standalone don't pay that cost.
 
 logging.basicConfig(
     level=logging.INFO,
@@ -77,6 +78,7 @@ def main():
             sys.exit(0)
 
     else:
+        from .mcp_server import run_mcp_server, make_protocol
         protocol = make_protocol(args.socket, args.name)
         try:
             asyncio.run(run_mcp_server(protocol))

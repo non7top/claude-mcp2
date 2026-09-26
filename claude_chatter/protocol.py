@@ -414,7 +414,6 @@ class ClaudeMessagingProtocol:
                             "content": content_val,
                             "timestamp": time.time()
                         })
-                        self.on_inbound_message("notifications/tools/list_changed", {})
 
                     ack = json.dumps({"status": "received", "msg_id": msg_id}) + "\n"
                     try:

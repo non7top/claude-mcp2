@@ -1,6 +1,6 @@
-# Claude Message Bridge MCP Server (`claude-bridge`)
+# claude-chatter-mcp bridge
 
-A Model Context Protocol (MCP) execution bridge built for **Google Antigravity** and **Claude Code** to enable non-blocking, authenticated bi-directional AI communication.
+`claude-chatter-mcp` bridges MCP-compatible agents to Claude's `SendMessage`/`ListAgents` implementation, allowing bidirectional communication - built for **Google Antigravity** and **Claude Code**, non-blocking and authenticated.
 
 ## 🚀 Key Features
 
@@ -45,17 +45,17 @@ Register directly with **Antigravity CLI (`agy`)** from GitHub without cloning:
 
 **Using `uvx`:**
 ```bash
-agy mcp add claudemessaging uvx --from git+https://github.com/non7top/claude-bridge.git bridge-mcp
+agy mcp add claudemessaging uvx --from git+https://github.com/non7top/claude-chatter-mcp.git bridge-mcp
 ```
 
 **Using `uv tool run`:**
 ```bash
-agy mcp add claudemessaging uv tool run --from git+https://github.com/non7top/claude-bridge.git bridge-mcp
+agy mcp add claudemessaging uv tool run --from git+https://github.com/non7top/claude-chatter-mcp.git bridge-mcp
 ```
 
 Or run directly in terminal:
 ```bash
-uvx --from git+https://github.com/non7top/claude-bridge.git bridge-mcp
+uvx --from git+https://github.com/non7top/claude-chatter-mcp.git bridge-mcp
 ```
 
 ---
@@ -66,7 +66,7 @@ Install the `bridge-mcp` binary permanently into your system path using `uv`:
 
 ```bash
 # 1. Install tool permanently into ~/.local/bin (or uv tool path)
-uv tool install git+https://github.com/non7top/claude-bridge.git
+uv tool install git+https://github.com/non7top/claude-chatter-mcp.git
 
 # 2. Register with Antigravity CLI
 agy mcp add claudemessaging bridge-mcp
@@ -78,8 +78,8 @@ agy mcp add claudemessaging bridge-mcp
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/non7top/claude-bridge.git
-   cd claude-bridge
+   git clone https://github.com/non7top/claude-chatter-mcp.git
+   cd claude-chatter-mcp
    ```
 
 2. **Register with Antigravity CLI (`agy`) using `uv` / `uvx`**:
