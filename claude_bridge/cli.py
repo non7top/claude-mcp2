@@ -31,10 +31,6 @@ def main():
     mode_group.add_argument("--send", nargs=2, metavar=("SESSION", "MESSAGE"), help="Send message to target Claude Code session")
     mode_group.add_argument("--purge", action="store_true", help="Proactively scan and purge dead session files")
 
-    send_group = parser.add_argument_group("Send & Server Options")
-    send_group.add_argument("--no-wait", action="store_true", help="Do not wait for assistant response turn when sending message")
-    send_group.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds for response turn completion (default: 60)")
-
     args = parser.parse_args()
 
     if args.list:
@@ -58,15 +54,11 @@ def main():
     elif args.send:
         protocol = ClaudeMessagingProtocol(bridge_socket_path=args.socket, session_name=args.name)
         target_session, message_text = args.send[0], args.send[1]
-        should_wait = not args.no_wait
-        timeout_val = args.timeout
 
         async def _cmd_send():
             res = await protocol.send_to_claude(
                 session_identifier=target_session,
-                message_content=message_text,
-                wait_for_response=should_wait,
-                timeout=timeout_val
+                message_content=message_text
             )
             print(json.dumps(res, indent=2))
             if not res.get("success"):

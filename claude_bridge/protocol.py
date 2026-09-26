@@ -9,7 +9,6 @@ reusable core that both the MCP entry point (mcp_server.py) and the
 standalone daemon entry point (standalone.py) build on top of.
 """
 import os
-import sys
 import json
 import glob
 import uuid
@@ -211,138 +210,17 @@ class ClaudeMessagingProtocol:
 
         return None
 
-    def _find_transcript_file(self, session_id: str, cwd: Optional[str] = None) -> Optional[str]:
-        if not session_id:
-            return None
-
-        # 1. Direct glob match across project folders
-        pattern = os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl")
-        matches = glob.glob(pattern)
-        if matches:
-            return matches[0]
-
-        # 2. Check predicted path from cwd if provided
-        if cwd:
-            sanitized_cwd = cwd.replace("/", "-")
-            predicted_path = os.path.expanduser(f"~/.claude/projects/{sanitized_cwd}/{session_id}.jsonl")
-            if os.path.exists(predicted_path):
-                return predicted_path
-
-        # 3. Recursive glob search across all project directories
-        rec_pattern = os.path.expanduser(f"~/.claude/projects/**/{session_id}.jsonl")
-        rec_matches = glob.glob(rec_pattern, recursive=True)
-        if rec_matches:
-            return rec_matches[0]
-
-        return None
-
-    async def wait_for_assistant_response(
-        self,
-        session_id: str,
-        start_offset: int,
-        pid: Optional[int] = None,
-        cwd: Optional[str] = None,
-        timeout: float = 60.0
-    ) -> Dict[str, Any]:
-        """
-        Monitors the target session transcript file until Claude finishes generating
-        its response turn, then extracts and returns the assistant's response text.
-        """
-        start_time = asyncio.get_event_loop().time()
-        transcript_file = self._find_transcript_file(session_id, cwd=cwd)
-
-        max_wait_file = min(15.0, timeout)
-        while not transcript_file:
-            if asyncio.get_event_loop().time() - start_time > max_wait_file:
-                break
-            await asyncio.sleep(0.5)
-            transcript_file = self._find_transcript_file(session_id, cwd=cwd)
-
-        if not transcript_file or not os.path.exists(transcript_file):
-            logger.warning(f"Transcript file for session {session_id} not found on disk.")
-            return {"completed": False, "content": "", "error": f"Transcript file for session '{session_id}' not found on disk"}
-
-        collected_texts = []
-        turn_completed = False
-
-        try:
-            with open(transcript_file, "r", encoding="utf-8") as f:
-                f.seek(start_offset)
-
-                while asyncio.get_event_loop().time() - start_time < timeout:
-                    line = f.readline()
-                    if not line:
-                        if pid and self.sessions_dir:
-                            session_file = os.path.join(self.sessions_dir, f"{pid}.json")
-                            if os.path.exists(session_file):
-                                try:
-                                    with open(session_file, "r", encoding="utf-8") as sf:
-                                        sdata = json.load(sf)
-                                        if sdata.get("status") == "idle" and collected_texts:
-                                            turn_completed = True
-                                            break
-                                except Exception:
-                                    pass
-                        await asyncio.sleep(0.3)
-                        continue
-
-                    try:
-                        data = json.loads(line.strip())
-                        msg_type = data.get("type")
-
-                        if msg_type == "assistant":
-                            content = data.get("message", {}).get("content", [])
-                            if isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get("type") == "text":
-                                        text_str = block.get("text", "").strip()
-                                        if text_str:
-                                            collected_texts.append(text_str)
-                            elif isinstance(content, str):
-                                text_str = content.strip()
-                                if text_str:
-                                    collected_texts.append(text_str)
-
-                        elif msg_type == "system" and data.get("subtype") == "turn_duration":
-                            turn_completed = True
-                            break
-                    except json.JSONDecodeError:
-                        continue
-        except Exception as e:
-            logger.error(f"Error reading transcript file {transcript_file}: {e}")
-
-        final_text = "\n\n".join(collected_texts).strip()
-        return {
-            "completed": turn_completed or bool(final_text),
-            "content": final_text,
-            "transcript_path": transcript_file
-        }
-
-    async def _background_monitor_response(
-        self,
-        msg_id: str,
-        session_id: str,
-        start_offset: int,
-        pid: Optional[int],
-        cwd: Optional[str],
-        timeout: float
-    ):
-        resp_data = await self.wait_for_assistant_response(session_id, start_offset, pid, cwd, timeout)
-        if msg_id in self.response_store:
-            self.response_store[msg_id]["status"] = "completed" if resp_data.get("completed") else "timeout"
-            self.response_store[msg_id]["response"] = resp_data.get("content", "")
-
     async def send_to_claude(
         self,
         session_identifier: str,
-        message_content: str,
-        wait_for_response: bool = True,
-        timeout: float = 60.0
+        message_content: str
     ) -> Dict[str, Any]:
         """
-        Establishes an out-bound wire pipe to a verified target session.
-        Uses key assets to authenticate and bypass confirmation steps.
-        If wait_for_response is True, waits for Claude to generate its turn and returns the response.
+        Establishes an out-bound wire pipe to a verified target session and dispatches
+        a message. Fire-and-forget: if the target sends a real reply, it arrives later
+        as its own inbound frame (see handle_inbound_client) - there is no in_reply_to
+        correlation in the wire protocol, so this does not (and cannot honestly) wait
+        for or return that reply synchronously.
         """
         await self.verify_and_purge_sessions()
 
@@ -356,9 +234,6 @@ class ClaudeMessagingProtocol:
 
         socket_path = peer.get("socket")
         token = peer.get("token", "")
-        session_id = peer.get("sessionId", "")
-        pid = peer.get("pid")
-        cwd = peer.get("cwd")
 
         if not socket_path or not os.path.exists(socket_path):
             logger.error(f"Socket path for '{peer['name']}' does not exist: {socket_path}")
@@ -366,15 +241,6 @@ class ClaudeMessagingProtocol:
                 "success": False,
                 "error": f"Socket path '{socket_path}' for session '{peer['name']}' does not exist on disk."
             }
-
-        # Determine start offset in transcript before dispatching
-        start_offset = 0
-        tfile = self._find_transcript_file(session_id, cwd=cwd)
-        if tfile and os.path.exists(tfile):
-            try:
-                start_offset = os.path.getsize(tfile)
-            except OSError:
-                start_offset = 0
 
         # Build NDJSON wire packets
         auth_frame = {"type": "auth", "peerToken": token}
@@ -414,39 +280,13 @@ class ClaudeMessagingProtocol:
             self.response_store[msg_id] = entry
             logger.info(f"Successfully dispatched message {msg_id} to {peer['name']}")
 
-            if wait_for_response:
-                logger.info(f"Waiting for response turn from {peer['name']} (timeout={timeout}s)...")
-                resp_data = await self.wait_for_assistant_response(
-                    session_id=session_id,
-                    start_offset=start_offset,
-                    pid=pid,
-                    cwd=cwd,
-                    timeout=timeout
-                )
-                response_text = resp_data.get("content", "")
-                entry["status"] = "completed" if resp_data.get("completed") else "timeout"
-                entry["response"] = response_text
-                self.response_store[msg_id] = entry
-
-                return {
-                    "success": True,
-                    "msg_id": msg_id,
-                    "target": peer["name"],
-                    "status": entry["status"],
-                    "response": response_text,
-                    "detail": entry
-                }
-            else:
-                asyncio.create_task(
-                    self._background_monitor_response(msg_id, session_id, start_offset, pid, cwd, timeout)
-                )
-                return {
-                    "success": True,
-                    "msg_id": msg_id,
-                    "target": peer["name"],
-                    "status": "dispatched",
-                    "detail": entry
-                }
+            return {
+                "success": True,
+                "msg_id": msg_id,
+                "target": peer["name"],
+                "status": "dispatched",
+                "detail": entry
+            }
 
         except Exception as e:
             logger.error(f"IPC injection crash sending to {socket_path}: {e}")

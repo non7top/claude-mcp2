@@ -165,7 +165,7 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
             return self.bridge.active_peers
         self.bridge.verify_and_purge_sessions = bypass_verify
 
-        res = await self.bridge.send_to_claude("mock-peer", "Hello Mock Peer!", wait_for_response=False)
+        res = await self.bridge.send_to_claude("mock-peer", "Hello Mock Peer!")
         await asyncio.sleep(0.05)
 
         self.assertTrue(res["success"])
@@ -177,35 +177,6 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
 
         mock_server.close()
         await mock_server.wait_closed()
-
-
-class TestTranscriptResponseParser(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.tmp_dir = tempfile.TemporaryDirectory()
-        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
-
-    async def asyncTearDown(self):
-        self.tmp_dir.cleanup()
-
-    async def test_transcript_parsing(self):
-        """Verify assistant text extraction from mock .jsonl transcript."""
-        session_id = "test-session-parse-123"
-        project_dir = os.path.join(self.tmp_dir.name, "mock-project")
-        os.makedirs(project_dir, exist_ok=True)
-        transcript_file = os.path.join(project_dir, f"{session_id}.jsonl")
-
-        # Mock _find_transcript_file to return our mock file
-        self.bridge._find_transcript_file = lambda sid, *args, **kwargs: transcript_file
-
-        with open(transcript_file, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"type": "user", "message": {"content": "Initial user prompt"}}) + "\n")
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Response Part 1"}]}}) + "\n")
-            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Response Part 2"}]}}) + "\n")
-            f.write(json.dumps({"type": "system", "subtype": "turn_duration", "durationMs": 1500}) + "\n")
-
-        res = await self.bridge.wait_for_assistant_response(session_id, start_offset=0, timeout=2.0)
-        self.assertTrue(res["completed"])
-        self.assertEqual(res["content"], "Response Part 1\n\nResponse Part 2")
 
 
 class TestMCPStdioProtocol(unittest.TestCase):
@@ -344,10 +315,11 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
                 except OSError:
                     pass
 
-    def test_cli_standalone_send_no_wait(self):
-        """Verify python3 bridge_mcp.py --send dispatches to a standalone daemon without
-        any canned auto-reply (the auto-reply/"Pong!" scaffold has been removed - a real
-        reply, if any, is expected to arrive via a genuine send_message call instead)."""
+    def test_cli_standalone_send(self):
+        """Verify python3 bridge_mcp.py --send dispatches to a standalone daemon.
+        send_to_claude is fire-and-forget (no auto-reply scaffold, no transcript
+        polling) - a real reply, if any, arrives later via a genuine send_message
+        call from the target instead."""
         socket_path = f"/tmp/test_pingpong_{uuid.uuid4().hex[:8]}.sock"
         daemon_name = f"suite-daemon-{uuid.uuid4().hex[:6]}"
 
@@ -362,10 +334,10 @@ class TestBridgeStandaloneCLI(unittest.TestCase):
             time.sleep(1.0)
             self.assertTrue(os.path.exists(socket_path))
 
-            # Send message to the daemon using --send --no-wait; dispatch should succeed
-            # immediately since it doesn't depend on any fabricated response turn.
+            # Send message to the daemon using --send; dispatch should succeed
+            # immediately since send_to_claude is fire-and-forget.
             res = subprocess.run(
-                [sys.executable, self.script_path, "--send", daemon_name, "hello standalone", "--no-wait"],
+                [sys.executable, self.script_path, "--send", daemon_name, "hello standalone"],
                 capture_output=True,
                 text=True,
                 timeout=10

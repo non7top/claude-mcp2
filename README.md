@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) execution bridge built for **Google Antigravity**
 
 * **Session Discovery & Automatic Purging**: Scans local workspace configurations (`~/.claude/sessions/*.json`), verifies process lifecycles via PID tracking (`psutil`), and automatically purges orphaned session descriptors and stale `.key` credential files.
 * **Authenticated Unix Socket IPC**: Authenticates outbound message frames directly into active target session sockets (`/run/user/<uid>/cc-socks/*.sock`) using exfiltrated `peerToken` credentials.
-* **Synchronous & Asynchronous Response Extraction**: Automatically tracks session transcript logs (`~/.claude/projects/*/<sessionId>.jsonl`) to wait for and extract full assistant turn responses.
+* **Fire-and-Forget Message Dispatch**: `send_message`/`--send` dispatches and returns immediately; a real reply, if the target sends one, arrives later as its own inbound message rather than being synchronously extracted from a transcript file.
 * **Dedicated Inbound Unix Socket Listener**: Listens on `/tmp/agy_mcp_bridge.sock` (with secure single-user `0600` permissions) for real-time peer confirmations and inbound message buffering.
 * **Graceful Lifecycle & Signal Handling**: Catches `SIGTERM` and `SIGINT` signals to cleanly unbind sockets and exit with status code `0`, avoiding process termination errors during MCP server reloads.
 
@@ -108,12 +108,10 @@ Scans Claude Code workspace configurations, cleans up orphaned/dead session file
 * **Arguments**: None
 
 ### 2. `send_message`
-Sends an authenticated user message frame to a target Claude Code session and waits for its response turn completion.
+Dispatches an authenticated user message frame to a target Claude Code session. Fire-and-forget: returns as soon as the message is delivered. Any real reply the target sends back arrives later as its own inbound message, observable via `get_responses`.
 * **Arguments**:
   * `session` (string, required): Target session name (e.g. `rgle`), PID, or Session ID.
   * `message` (string, required): Text message content to deliver.
-  * `wait` (boolean, optional, default: `true`): Whether to wait for Claude to generate its response turn.
-  * `timeout` (number, optional, default: `60.0`): Maximum seconds to wait for turn completion.
 
 ### 3. `get_responses`
 Queries historical inbound and outbound message response records cached in memory.
@@ -156,13 +154,9 @@ Execute single-shot operations directly from terminal:
   ```bash
   bridge-mcp --purge
   ```
-* **Send Message to Session**:
+* **Send Message to Session** (fire-and-forget; any reply arrives later as its own inbound message):
   ```bash
   bridge-mcp --send rgle "Hello from CLI"
-  ```
-* **Send Asynchronously (`--no-wait`)**:
-  ```bash
-  bridge-mcp --send rgle "Long running background task" --no-wait
   ```
 
 ---
