@@ -15,7 +15,7 @@ import subprocess
 
 # Ensure repo directory is in path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-from claude_bridge import ClaudeMessagingProtocol
+from claude_chatter import ClaudeMessagingProtocol
 
 
 class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
@@ -201,8 +201,19 @@ class TestMCPStdioProtocol(unittest.TestCase):
         )
 
         try:
-            # 1. initialize
-            init_req = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+            # 1. initialize - FastMCP validates against the real MCP spec, which
+            # requires protocolVersion/capabilities/clientInfo (unlike the old
+            # hand-rolled server, which accepted anything here).
+            init_req = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test-suite", "version": "1.0"}
+                }
+            }
             proc.stdin.write(json.dumps(init_req) + "\n")
             proc.stdin.flush()
             init_resp = json.loads(proc.stdout.readline())

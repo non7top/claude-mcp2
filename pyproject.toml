@@ -3,17 +3,20 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-bridge"
-version = "0.2.0"
-description = "Bi-Directional AI Communication MCP Bridge for Claude Code sessions"
+name = "claude-chatter-mcp"
+version = "0.3.0"
+description = "claude-chatter-mcp bridges MCP compatible agents to Claude's SendMessage/ListAgents implementation, allowing bidirectional communication."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "psutil>=5.9.0",
+    "fastmcp>=4.0.10",
 ]
 
 [project.scripts]
-bridge-mcp = "claude_bridge.cli:main"
+bridge-mcp = "claude_chatter.cli:main"
 
 [tool.setuptools]
-packages = ["claude_bridge"]
+packages = ["claude_chatter"]
