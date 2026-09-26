@@ -15,14 +15,14 @@ import subprocess
 
 # Ensure repo directory is in path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-from bridge_mcp import ClaudeMessageBridgeMCP
+from claude_bridge import ClaudeMessagingProtocol
 
 
 class TestBridgeSessionManagement(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.socket_path = os.path.join(self.tmp_dir.name, "test_session_mgmt.sock")
-        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=self.socket_path)
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path)
 
     async def asyncTearDown(self):
         self.bridge.cleanup_session_descriptor()
@@ -82,7 +82,7 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
         self.socket_path = os.path.join(self.tmp_dir.name, "test_ipc.sock")
-        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=self.socket_path)
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=self.socket_path)
 
     async def asyncTearDown(self):
         self.bridge.cleanup_session_descriptor()
@@ -182,7 +182,7 @@ class TestBridgeIPCCommunication(unittest.IsolatedAsyncioTestCase):
 class TestTranscriptResponseParser(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp_dir = tempfile.TemporaryDirectory()
-        self.bridge = ClaudeMessageBridgeMCP(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
+        self.bridge = ClaudeMessagingProtocol(bridge_socket_path=os.path.join(self.tmp_dir.name, "test.sock"))
 
     async def asyncTearDown(self):
         self.tmp_dir.cleanup()
