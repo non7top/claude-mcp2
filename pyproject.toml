@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claude-mcp2"
-version = "0.1.0"
+name = "claude-bridge"
+version = "0.2.0"
 description = "Bi-Directional AI Communication MCP Bridge for Claude Code sessions"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-bridge-mcp = "bridge_mcp:main"
+bridge-mcp = "claude_bridge.cli:main"
 
 [tool.setuptools]
-py-modules = ["bridge_mcp"]
+packages = ["claude_bridge"]
