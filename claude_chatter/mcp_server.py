@@ -39,6 +39,11 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
     # signal instead; see INSTRUCTIONS for what the host is expected to do
     # with it.
     last_session_holder: Dict[str, Any] = {"session": None}
+    # asyncio.create_task() only holds a WEAK reference to the task it returns -
+    # an unreferenced task can be garbage-collected mid-flight, before it
+    # actually sends anything, per the asyncio docs' own warning. Keep a strong
+    # reference until each notification task finishes.
+    background_tasks: set = set()
 
     def _remember_session(ctx: Context):
         last_session_holder["session"] = ctx.session
@@ -48,7 +53,9 @@ def build_mcp_server(protocol: ClaudeMessagingProtocol) -> FastMCP:
         if session is None:
             return
         try:
-            asyncio.create_task(session.send_tool_list_changed())
+            task = asyncio.create_task(session.send_tool_list_changed())
+            background_tasks.add(task)
+            task.add_done_callback(background_tasks.discard)
         except Exception as e:
             logger.error(f"Failed to send tool_list_changed notification: {e}")
 
